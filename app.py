@@ -538,10 +538,14 @@ def extract_business_name_from_json(json_data, filename=""):
         return clean_account_name(account_names[0]), account_names, account_info
 
 def create_business_name_mapping_interface(business_extractions):
-    """Create enhanced business name mapping interface with manual override"""
+    """Create enhanced business name mapping interface with existing business dropdown"""
     
     st.markdown("**Review and confirm business names extracted from account data:**")
-    st.info("💡 **Tip**: If the extracted name doesn't match your business name, you can manually edit it or choose from account options below.")
+    st.info("💡 **Tip**: You can use extracted names, choose from account options, select from existing businesses, or enter manually.")
+    
+    # Get existing businesses for dropdown
+    existing_businesses_df = get_all_businesses()
+    existing_business_names = [""] + list(existing_businesses_df['name'].tolist()) if not existing_businesses_df.empty else [""]
     
     business_name_mappings = {}
     
@@ -572,12 +576,12 @@ def create_business_name_mapping_interface(business_extractions):
         with col2:
             st.markdown(f"**🏢 Business Name Configuration**")
             
-            # Method selection
+            # Method selection - updated options
             mapping_method = st.radio(
                 "How would you like to set the business name?",
-                ["Use extracted name", "Choose from account names", "Enter manually"],
+                ["Use extracted name", "Choose from account names", "Select existing business", "Enter manually"],
                 key=f"method_{extraction['file_index']}",
-                horizontal=True
+                horizontal=False
             )
             
             if mapping_method == "Use extracted name":
@@ -611,6 +615,26 @@ def create_business_name_mapping_interface(business_extractions):
                     key=f"cleaned_name_{extraction['file_index']}",
                     help=f"Cleaned version of '{selected_account}' - edit if needed"
                 )
+            
+            elif mapping_method == "Select existing business":
+                # Dropdown of existing businesses
+                if len(existing_business_names) > 1:
+                    selected_existing = st.selectbox(
+                        "Choose from existing businesses:",
+                        existing_business_names,
+                        key=f"existing_select_{extraction['file_index']}",
+                        help="Select a business that's already configured in Business Management"
+                    )
+                    
+                    final_business_name = selected_existing if selected_existing else ""
+                    
+                    if not selected_existing:
+                        st.info("Please select a business from the dropdown")
+                    else:
+                        st.success(f"✅ Selected: {selected_existing}")
+                else:
+                    st.warning("No existing businesses found. Go to Business Management tab to add businesses first.")
+                    final_business_name = ""
                 
             else:  # Enter manually
                 # Manual entry with suggestions
@@ -623,10 +647,10 @@ def create_business_name_mapping_interface(business_extractions):
                 
                 # Show suggestions based on account names
                 if extraction['account_options']:
-                    st.markdown("**💡 Suggestions based on account names:**")
-                    suggestion_cols = st.columns(len(extraction['account_options']))
-                    for idx, account_name in enumerate(extraction['account_options']):
-                        with suggestion_cols[idx]:
+                    st.markdown("**💡 Quick suggestions:**")
+                    suggestion_cols = st.columns(min(len(extraction['account_options']), 3))
+                    for idx, account_name in enumerate(extraction['account_options'][:3]):  # Limit to 3 suggestions
+                        with suggestion_cols[idx % 3]:
                             cleaned_suggestion = clean_account_name(account_name)
                             if st.button(f"Use: {cleaned_suggestion}", key=f"suggest_{extraction['file_index']}_{idx}"):
                                 st.session_state[f"manual_name_{extraction['file_index']}"] = cleaned_suggestion
@@ -635,8 +659,15 @@ def create_business_name_mapping_interface(business_extractions):
             business_name_mappings[extraction['file_index']] = final_business_name
             
             # Show preview of final name
-            if final_business_name.strip():
+            if final_business_name and final_business_name.strip():
                 st.success(f"✅ **Final Business Name:** `{final_business_name}`")
+                
+                # Show if this business exists in the system
+                if final_business_name in existing_business_names[1:]:  # Exclude empty string
+                    business_percentage = existing_businesses_df[existing_businesses_df['name'] == final_business_name]['processing_percentage'].iloc[0]
+                    st.info(f"📊 **Processing Rate:** {business_percentage}% (configured)")
+                else:
+                    st.warning("⚠️ **New Business** - configure processing percentage in Business Management tab")
             else:
                 st.error("⚠️ Please enter a business name")
     
@@ -717,25 +748,39 @@ def processing_analysis_tab():
         
         # Date range selection
         st.subheader("⏰ Time Period Selection")
-        col1, col2, col3 = st.columns(3)
         
-        with col1:
-            period_type = st.selectbox(
-                "Period Type",
-                ["Custom Range", "Today", "This Week", "This Month", "Last 30 Days"]
-            )
+        period_type = st.selectbox(
+            "Period Type",
+            ["Today", "This Week", "This Month", "Last 30 Days", "Custom Range"]
+        )
         
         if period_type == "Custom Range":
+            st.markdown("**Custom Date Range:**")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                start_date_str = st.text_input(
+                    "Start Date (YYYY-MM-DD)",
+                    value=date.today().replace(month=1, day=1).strftime("%Y-%m-%d"),
+                    help="Enter date in YYYY-MM-DD format"
+                )
+                try:
+                    start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+                except:
+                    st.error("Invalid start date format. Use YYYY-MM-DD")
+                    return
+                    
             with col2:
-                start_date = st.date_input(
-                    "Start Date",
-                    value=date.today().replace(month=1, day=1)
+                end_date_str = st.text_input(
+                    "End Date (YYYY-MM-DD)",
+                    value=date.today().strftime("%Y-%m-%d"),
+                    help="Enter date in YYYY-MM-DD format"
                 )
-            with col3:
-                end_date = st.date_input(
-                    "End Date",
-                    value=date.today()
-                )
+                try:
+                    end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+                except:
+                    st.error("Invalid end date format. Use YYYY-MM-DD")
+                    return
         elif period_type == "Today":
             start_date = end_date = date.today()
         elif period_type == "This Week":
@@ -875,18 +920,19 @@ def processing_analysis_tab():
                     
                     with col1:
                         # Export business summary
-                        if st.button("📊 Export Business Summary"):
+                        if st.button("📊 Export Business Summary", key="export_summary_btn"):
                             csv_data = business_summary.to_csv()
                             st.download_button(
-                                label="Download Business Summary CSV",
+                                label="⬇️ Download Business Summary CSV",
                                 data=csv_data,
                                 file_name=f"business_processing_summary_{start_date}_{end_date}.csv",
-                                mime="text/csv"
+                                mime="text/csv",
+                                key="download_summary"
                             )
                     
                     with col2:
                         # Export all income transactions
-                        if st.button("📋 Export Income Transactions"):
+                        if st.button("📋 Export Income Transactions", key="export_transactions_btn"):
                             export_df = income_df[[
                                 'business_name', 'date', 'name', 'amount', 'mca_subcategory',
                                 'account_name', 'transaction_id'
@@ -894,11 +940,44 @@ def processing_analysis_tab():
                             
                             csv_data = export_df.to_csv(index=False)
                             st.download_button(
-                                label="Download Income Transactions CSV",
+                                label="⬇️ Download Income Transactions CSV",
                                 data=csv_data,
                                 file_name=f"income_transactions_{start_date}_{end_date}.csv",
-                                mime="text/csv"
+                                mime="text/csv",
+                                key="download_transactions"
                             )
+                    
+                    # Alternative: Direct download buttons
+                    st.markdown("---")
+                    st.markdown("**📥 Direct Downloads:**")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        # Business summary direct download
+                        summary_csv = business_summary.to_csv()
+                        st.download_button(
+                            label="📊 Business Summary CSV",
+                            data=summary_csv,
+                            file_name=f"business_summary_{start_date}_{end_date}.csv",
+                            mime="text/csv",
+                            key="direct_summary_download"
+                        )
+                    
+                    with col2:
+                        # Transactions direct download
+                        transactions_export_df = income_df[[
+                            'business_name', 'date', 'name', 'amount', 'mca_subcategory',
+                            'account_name', 'transaction_id', 'merchant_name'
+                        ]].copy()
+                        transactions_csv = transactions_export_df.to_csv(index=False)
+                        
+                        st.download_button(
+                            label="📋 Income Transactions CSV",
+                            data=transactions_csv,
+                            file_name=f"income_transactions_{start_date}_{end_date}.csv",
+                            mime="text/csv",
+                            key="direct_transactions_download"
+                        )
                 else:
                     st.warning("No income transactions found in the selected time period.")
                 
