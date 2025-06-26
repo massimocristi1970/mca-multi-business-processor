@@ -268,10 +268,12 @@ def map_transaction_category(transaction):
         combined_text
     ):
         return "Income"
-    if is_credit and re.search(r"(you\s?lend|yl\s?ii|yl\s?ltd|yl\s?limited|yl\s?a\s?limited)(?!.*\b(fnd|fund|funding)\b)", combined_text):
-        return "Income"
-    if is_credit and re.search(r"(you\s?lend|yl\s?ii|yl\s?ltd|yl\s?limited|yl\s?a\s?limited).*\b(fnd|fund|funding)\b", combined_text):
-        return "Loans"
+    if is_credit and re.search(r"(you\s?lend|yl\s?ii|yl\s?ltd|yl\s?limited|yl\s?a\s?limited)", combined_text):
+        # Check if it contains funding indicators (including within reference numbers)
+        if re.search(r"(fnd|fund|funding)", combined_text):
+            return "Loans"
+        else:
+            return "Income"
     if is_credit and re.search(
         r"\biwoca\b|\bcapify\b|\bfundbox\b|\bgot[\s\-]?capital\b|\bfunding[\s\-]?circle\b|"
         r"\bfleximize\b|\bmarketfinance\b|\bliberis\b|\besme[\s\-]?loans\b|\bthincats\b|"
@@ -296,12 +298,16 @@ def map_transaction_category(transaction):
         r"\bswig[\s\-]?finance\b|\benterprise[\s\-]?answers\b|\blet's[\s\-]?do[\s\-]?business[\s\-]?finance\b|"
         r"\bfinance[\s\-]?for[\s\-]?enterprise\b|\bdsl[\s\-]?business[\s\-]?finance\b|\bbizcap[\s\-]?uk\b|"
         r"\bsigma[\s\-]?lending\b|\bbizlend[\s\-]?ltd\b|"
-        r"\bloans?\b|\bdebt\b|\brepayment\b|\binstal?ments?\b|\bpay[\s\-]?back\b|\brepay(?:ing|ment|ed)?\b|\bcleared\b",
+        r"\bloan[\s\-]?repayment\b|\bdebt[\s\-]?repayment\b|\binstal?ments?\b|\bpay[\s\-]+back\b|\brepay(?:ing|ment|ed)?\b",
         combined_text
     ):
         return "Debt Repayments"
+        
+    # Step 1.5: Business expense override (before Plaid fallback)
+    if re.search(r"(facebook|facebk|fb\.me|outlook|office365|microsoft|google\s+ads|linkedin|twitter|adobe|zoom|slack|shopify|wix|squarespace|mailchimp|hubspot)", combined_text, re.IGNORECASE):
+        return "Expenses"
 
-    # Step 2: Plaid category fallback
+    # Step 2: Plaid category fallback with validation
     plaid_map = {
         "income_wages": "Income",
         "income_other_income": "Income",
@@ -310,12 +316,6 @@ def map_transaction_category(transaction):
         "income_retirement_pension": "Special Inflow",
         "income_unemployment": "Special Inflow",
         "transfer_in_cash_advances_and_loans": "Loans",
-        "loan_payments_credit_card_payment": "Debt Repayments",
-        "loan_payments_personal_loan_payment": "Debt Repayments",
-        "loan_payments_other_payment": "Debt Repayments",
-        "loan_payments_car_payment": "Debt Repayments",
-        "loan_payments_mortgage_payment": "Debt Repayments",
-        "loan_payments_student_loan_payment": "Debt Repayments",
         "transfer_in_investment_and_retirement_funds": "Special Inflow",
         "transfer_in_savings": "Special Inflow",
         "transfer_in_account_transfer": "Special Inflow",
@@ -329,6 +329,13 @@ def map_transaction_category(transaction):
         "bank_fees_insufficient_funds": "Failed Payment",
         "bank_fees_late_payment": "Failed Payment",
     }
+
+    # Handle loan payment categories with validation
+    if category.startswith("loan_payments_"):
+        # Only trust Plaid if transaction contains actual loan/debt keywords
+        if re.search(r"(loan|debt|repay|finance|lending|credit|iwoca|capify|fundbox)", combined_text, re.IGNORECASE):
+            return "Debt Repayments"
+        # Otherwise, don't trust Plaid and continue to other checks
 
     # Match exact key
     if category in plaid_map:
@@ -347,7 +354,11 @@ def map_transaction_category(transaction):
         if any(category.startswith(p) for p in patterns):
             return label
 
-    return "Uncategorised"
+   # Default fallback: debit transactions become Expenses, credit transactions stay Uncategorised
+    if is_debit:
+        return "Expenses"
+    else:
+        return "Uncategorised"
 
 def categorize_transaction(transaction_dict):
     """
