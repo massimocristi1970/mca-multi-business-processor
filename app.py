@@ -262,7 +262,7 @@ def map_transaction_category(transaction):
         r"|capital\s+on\s+tap|capital\s+one|evo\s*payments?|tink|teya(\s+solutions)?|talech"
         r"|barclaycard|elavon|adyen|payzone|verifone|ingenico"
         r"|nmi|trust\s+payments?|global\s+payments?|checkout\.com|epdq|santander|handepay"
-        r"|dojo|valitor|paypoint|mypos|moneris"
+        r"|dojo|valitor|paypoint|mypos|moneris|paymentsense"
         r"|merchant\s+services|payment\s+sense"
         r")\b", 
         combined_text
@@ -304,7 +304,7 @@ def map_transaction_category(transaction):
         return "Debt Repayments"
         
     # Step 1.5: Business expense override (before Plaid fallback)
-    if re.search(r"(facebook|facebk|fb\.me|outlook|office365|microsoft|google\s+ads|linkedin|twitter|adobe|zoom|slack|shopify|wix|squarespace|mailchimp|hubspot)", combined_text, re.IGNORECASE):
+    if re.search(r"(facebook|facebk|fb\.me|outlook|office365|microsoft|google\s+ads|linkedin|twitter|adobe|zoom|slack|shopify|wix|squarespace|mailchimp|hubspot|hmrc\s*vat|hmrc|hm\s*revenue|hm\s*customs)", combined_text, re.IGNORECASE):
         return "Expenses"
 
     # Step 2: Plaid category fallback with validation
