@@ -259,11 +259,12 @@ def map_transaction_category(transaction):
         r"stripe|sumup|zettle|square|take\s*payments|shopify|card\s+settlement|daily\s+takings|payout"
         r"|paypal|go\s*cardless|klarna|worldpay|izettle|ubereats|just\s*eat|deliveroo|uber|bolt"
         r"|fresha|treatwell|taskrabbit|terminal|pos\s+deposit|revolut"
-        r"|capital\s+on\s+tap|capital\s+one|evo\s*payments?|tink|teya(\s+solutions)?|talech"
+        r"|capital\s+one|evo\s*payments?|tink|teya(\s+solutions)?|talech"
         r"|barclaycard|elavon|adyen|payzone|verifone|ingenico"
         r"|nmi|trust\s+payments?|global\s+payments?|checkout\.com|epdq|santander|handepay"
         r"|dojo|valitor|paypoint|mypos|moneris|paymentsense"
         r"|merchant\s+services|payment\s+sense"
+        r"|bcard\d*\s*bcard|bcard\d+|bcard\s+\d+"
         r")\b", 
         combined_text
     ):
