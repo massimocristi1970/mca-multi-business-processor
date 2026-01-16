@@ -47,3 +47,6 @@ data/*.json
 
 # Logs
 *.log
+# Python venv
+.venv/
+
