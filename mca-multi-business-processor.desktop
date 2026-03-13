@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=MCA Multi-Business Processor
+Comment=Launch MCA Multi-Business Processor
+Exec=/home/massimocristi/Dev/mca-multi-business-processor/launch-mca.sh
+Icon=utilities-terminal
+Terminal=false
+Categories=Development;
+Path=/home/massimocristi/Dev/mca-multi-business-processor
+NoDisplay=false
+StartupNotify=true
