@@ -38,7 +38,8 @@ Thumbs.db
 # Streamlit
 .streamlit/
 
-# Database (keep the database file but ignore backups)
+# Database
+mca_business_data.db
 mca_business_data.db.backup
 *.db-journal
 

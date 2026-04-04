@@ -4,9 +4,7 @@ import json
 import re
 import sqlite3
 from datetime import datetime, date, timedelta
-import io
 import os
-from typing import Dict, List, Tuple, Optional
 
 # Database setup
 DATABASE_FILE = "mca_business_data.db"
@@ -51,27 +49,6 @@ def init_database():
     
     conn.commit()
     conn.close()
-
-def extract_business_name_from_json(json_data, filename=""):
-    """Extract business name from JSON account data with multi-account handling"""
-    accounts = json_data.get('accounts', [])
-    
-    if not accounts:
-        return f"Unknown Business ({filename})", []
-    
-    # Get all unique account names
-    account_names = []
-    for account in accounts:
-        name = account.get('name', 'Unknown Account')
-        if name not in account_names:
-            account_names.append(name)
-    
-    if len(account_names) == 1:
-        # Single account - use it directly after cleaning
-        return clean_account_name(account_names[0]), account_names
-    else:
-        # Multiple accounts - return first one as default, but provide options
-        return clean_account_name(account_names[0]), account_names
 
 def clean_account_name(account_name):
     """Clean account name to extract business name"""
@@ -186,6 +163,22 @@ def add_or_update_business(name: str, processing_percentage: float) -> int:
     cursor.execute('SELECT id FROM businesses WHERE name = ?', (name,))
     business_id = cursor.fetchone()[0]
     
+    conn.commit()
+    conn.close()
+    return business_id
+
+def update_business_by_id(business_id: int, name: str, processing_percentage: float) -> int:
+    """Update an existing business by ID, preserving identity across renames."""
+    conn = sqlite3.connect(DATABASE_FILE)
+    cursor = conn.cursor()
+
+    current_time = datetime.now().isoformat()
+    cursor.execute('''
+        UPDATE businesses
+        SET name = ?, processing_percentage = ?, updated_date = ?
+        WHERE id = ?
+    ''', (name, processing_percentage, current_time, business_id))
+
     conn.commit()
     conn.close()
     return business_id
@@ -305,7 +298,7 @@ def map_transaction_category(transaction):
         return "Debt Repayments"
         
     # Step 1.5: Business expense override (before Plaid fallback)
-    if re.search(r"(facebook|facebk|fb\.me|outlook|office365|microsoft|google\s+ads|linkedin|twitter|adobe|zoom|slack|shopify|wix|squarespace|mailchimp|hubspot|hmrc\s*vat|hmrc|hm\s*revenue|hm\s*customs)", combined_text, re.IGNORECASE):
+    if is_debit and re.search(r"(facebook|facebk|fb\.me|outlook|office365|microsoft|google\s+ads|linkedin|twitter|adobe|zoom|slack|shopify|wix|squarespace|mailchimp|hubspot|hmrc\s*vat|hmrc|hm\s*revenue|hm\s*customs)", combined_text, re.IGNORECASE):
         return "Expenses"
 
     # Step 2: Plaid category fallback with validation
@@ -368,6 +361,161 @@ def categorize_transaction(transaction_dict):
     category = map_transaction_category(transaction_dict)
     return category
 
+def normalize_category_value(category_value):
+    """Normalize category payloads from strings/lists into a readable string."""
+    if isinstance(category_value, list):
+        return ", ".join(map(str, category_value))
+    if category_value is None:
+        return ""
+    return str(category_value)
+
+def get_uploaded_files_signature(uploaded_files):
+    """Create a stable signature for the current upload selection."""
+    return tuple(
+        (uploaded_file.name, getattr(uploaded_file, "size", None))
+        for uploaded_file in uploaded_files
+    )
+
+def clear_processing_results():
+    """Clear cached processing results when uploads change or are removed."""
+    for key in ("df", "business_mappings", "date_range", "upload_signature"):
+        st.session_state.pop(key, None)
+
+def calculate_business_summary(df: pd.DataFrame, business_percentages: dict) -> pd.DataFrame:
+    """Summarize income and processing totals by business."""
+    income_df = df[df['is_revenue'] == True].copy()
+    if income_df.empty:
+        return pd.DataFrame()
+
+    business_summary = income_df.groupby('business_name').agg({
+        'amount': lambda x: abs(pd.to_numeric(x, errors='coerce')).sum(),
+        'transaction_id': 'count'
+    }).round(2)
+    business_summary.columns = ['Total Income', 'Transaction Count']
+    business_summary['Processing %'] = business_summary.index.map(
+        lambda x: business_percentages.get(x, 0.0)
+    )
+    business_summary['Amount to Process'] = (
+        business_summary['Total Income'] * business_summary['Processing %'] / 100
+    ).round(2)
+
+    return business_summary
+
+def render_processing_results(df: pd.DataFrame, start_date: date, end_date: date):
+    """Render processing outputs from cached session state results."""
+    businesses_df = get_all_businesses()
+    business_percentages = dict(zip(businesses_df['name'], businesses_df['processing_percentage']))
+
+    st.subheader("💰 Income Analysis & Processing Calculations")
+
+    income_df = df[df['is_revenue'] == True].copy()
+    business_summary = calculate_business_summary(df, business_percentages)
+
+    if not business_summary.empty:
+        st.dataframe(
+            business_summary.style.format({
+                'Total Income': '£{:,.2f}',
+                'Amount to Process': '£{:,.2f}',
+                'Processing %': '{:.1f}%'
+            }),
+            use_container_width=True
+        )
+
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Businesses", len(business_summary))
+        with col2:
+            total_income = business_summary['Total Income'].sum()
+            st.metric("Total Income", f"£{total_income:,.2f}")
+        with col3:
+            total_processing = business_summary['Amount to Process'].sum()
+            st.metric("Total to Process", f"£{total_processing:,.2f}")
+        with col4:
+            avg_percentage = business_summary['Processing %'].mean()
+            st.metric("Avg Processing %", f"{avg_percentage:.1f}%")
+
+        if st.button("💾 Save Processing Calculations", type="secondary", key="save_processing_calculations"):
+            period_start = start_date.isoformat()
+            period_end = end_date.isoformat()
+
+            for business_name, row in business_summary.iterrows():
+                business_id = add_or_update_business(business_name, row['Processing %'])
+                save_processing_history(
+                    business_id=business_id,
+                    date=date.today().isoformat(),
+                    income_amount=row['Total Income'],
+                    processing_amount=row['Amount to Process'],
+                    period_start=period_start,
+                    period_end=period_end
+                )
+
+            st.success("Processing calculations saved to database!")
+
+        if st.checkbox("📊 Show Daily Breakdown", key="show_daily_breakdown"):
+            st.subheader("Daily Income Breakdown")
+
+            income_df['date'] = pd.to_datetime(income_df['date']).dt.date
+            daily_breakdown = income_df.groupby(['business_name', 'date']).agg({
+                'amount': lambda x: abs(pd.to_numeric(x, errors='coerce')).sum()
+            }).round(2)
+            daily_breakdown.columns = ['Daily Income']
+
+            daily_breakdown = daily_breakdown.reset_index()
+            daily_breakdown['Processing %'] = daily_breakdown['business_name'].map(
+                lambda x: business_percentages.get(x, 0.0)
+            )
+            daily_breakdown['Amount to Process'] = (
+                daily_breakdown['Daily Income'] * daily_breakdown['Processing %'] / 100
+            ).round(2)
+
+            daily_pivot = daily_breakdown.pivot(
+                index='date',
+                columns='business_name',
+                values='Amount to Process'
+            ).fillna(0)
+
+            st.dataframe(
+                daily_pivot.style.format('£{:,.2f}'),
+                use_container_width=True
+            )
+
+        st.subheader("📤 Export Options")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            summary_csv = business_summary.to_csv()
+            st.download_button(
+                label="📊 Business Summary CSV",
+                data=summary_csv,
+                file_name=f"business_summary_{start_date}_{end_date}.csv",
+                mime="text/csv",
+                key="direct_summary_download"
+            )
+
+        with col2:
+            transactions_export_df = income_df[[
+                'business_name', 'date', 'name', 'amount', 'mca_subcategory',
+                'account_name', 'transaction_id', 'merchant_name'
+            ]].copy()
+            transactions_csv = transactions_export_df.to_csv(index=False)
+            st.download_button(
+                label="📋 Income Transactions CSV",
+                data=transactions_csv,
+                file_name=f"income_transactions_{start_date}_{end_date}.csv",
+                mime="text/csv",
+                key="direct_transactions_download"
+            )
+    else:
+        st.warning("No income transactions found in the selected time period.")
+
+    unique_businesses = set(df['business_name'].unique())
+    configured_businesses = set(business_percentages.keys())
+    unconfigured = unique_businesses - configured_businesses
+
+    if unconfigured:
+        st.warning(f"⚠️ The following businesses need processing percentages configured: {', '.join(unconfigured)}")
+        st.info("💡 Go to the **Business Management** tab to set processing percentages.")
+
 def process_multiple_json_files(uploaded_files, business_name_mappings, start_date=None, end_date=None):
     """
     Process multiple JSON files with business name mappings from JSON content
@@ -400,7 +548,10 @@ def process_multiple_json_files(uploaded_files, business_name_mappings, start_da
             # Create routing data
             routing_data = {}
             for acct in accounts:
-                acct_id = acct['account_id']
+                acct_id = acct.get('account_id')
+                if not acct_id:
+                    st.warning(f"Skipping malformed account in {uploaded_file.name}: missing account_id")
+                    continue
                 routing_data[acct_id] = {
                     'sort_code': acct.get('sort_code', 'N/A'),
                     'account_number': acct.get('account', 'N/A'),
@@ -412,7 +563,9 @@ def process_multiple_json_files(uploaded_files, business_name_mappings, start_da
                 try:
                     acct_id = txn.get('account_id', 'unknown')
                     route_info = routing_data.get(acct_id, {})
-                    amount = txn.get('amount')
+                    amount = pd.to_numeric(txn.get('amount'), errors='coerce')
+                    if pd.isna(amount):
+                        raise ValueError("missing or invalid amount")
                     
                     # Apply your MCA categorization logic
                     mca_subcategory = categorize_transaction(txn)
@@ -430,8 +583,8 @@ def process_multiple_json_files(uploaded_files, business_name_mappings, start_da
                         'date': txn.get('date'),
                         'name': txn.get('name', 'Unknown Transaction'),
                         'merchant_name': txn.get('merchant_name', ''),
-                        'amount': amount,
-                        'original_category': ", ".join(txn.get('category') or []),
+                        'amount': float(amount),
+                        'original_category': normalize_category_value(txn.get('category')),
                         'personal_finance_category.detailed': txn.get('personal_finance_category.detailed', ''),
                         'mca_subcategory': mca_subcategory,
                         'account_id': acct_id,
@@ -457,7 +610,6 @@ def business_management_tab():
     """Business management interface"""
     st.header("Business Management")
     
-    # Get all businesses
     businesses_df = get_all_businesses()
     
     col1, col2 = st.columns([2, 1])
@@ -465,10 +617,10 @@ def business_management_tab():
     with col1:
         st.subheader("Current Businesses")
         if not businesses_df.empty:
-            # Display businesses with edit capability
             edited_df = st.data_editor(
-                businesses_df[['name', 'processing_percentage']],
+                businesses_df[['id', 'name', 'processing_percentage']],
                 column_config={
+                    "id": None,
                     "name": "Business Name",
                     "processing_percentage": st.column_config.NumberColumn(
                         "Processing %",
@@ -484,10 +636,9 @@ def business_management_tab():
                 key="business_editor"
             )
             
-            # Update businesses if changes were made
             if st.button("Save Changes", type="primary"):
-                for idx, row in edited_df.iterrows():
-                    add_or_update_business(row['name'], row['processing_percentage'])
+                for _, row in edited_df.iterrows():
+                    update_business_by_id(int(row['id']), str(row['name']).strip(), float(row['processing_percentage']))
                 st.success("Business settings updated!")
                 st.rerun()
         else:
@@ -689,400 +840,189 @@ def processing_analysis_tab():
     """Main processing and analysis interface with enhanced JSON content extraction"""
     st.header("Multi-Business Transaction Processing")
     
-    # File upload
     uploaded_files = st.file_uploader(
         "Upload Business Transaction JSON Files", 
         type=['json'],
         accept_multiple_files=True,
         help="Select multiple JSON files - business names will be extracted from account data within each file."
     )
-    
-    if uploaded_files:
-        st.subheader("Business Name Extraction & Configuration")
-        
-        # Extract business names from JSON content
-        business_extractions = []
-        for i, file in enumerate(uploaded_files):
-            try:
-                # Read JSON to extract business name
-                file.seek(0)  # Reset file pointer
-                json_data = json.load(file)
-                file.seek(0)  # Reset again for later processing
-                
-                extracted_name, account_options, account_info = extract_business_name_from_json(json_data, file.name)
-                
-                business_extractions.append({
-                    'file_index': i,
-                    'filename': file.name,
-                    'extracted_name': extracted_name,
-                    'account_options': account_options,
-                    'account_info': account_info,
-                    'has_multiple_accounts': len(account_options) > 1
-                })
-            except Exception as e:
-                st.error(f"Error reading {file.name}: {e}")
-                # Fallback to filename extraction
-                fallback_name = extract_business_name_from_filename(file.name)
-                business_extractions.append({
-                    'file_index': i,
-                    'filename': file.name,
-                    'extracted_name': fallback_name,
-                    'account_options': [fallback_name],
-                    'account_info': {},
-                    'has_multiple_accounts': False
-                })
-        
-        # Enhanced business name mapping interface
-        business_name_mappings = create_business_name_mapping_interface(business_extractions)
-        
-        # Show final mapping summary
-        st.subheader("📋 Final Business Mapping Summary")
-        mapping_data = []
-        all_names_valid = True
-        
-        for i in range(len(uploaded_files)):
-            business_name = business_name_mappings.get(i, "")
-            if not business_name.strip():
-                all_names_valid = False
+
+    if not uploaded_files:
+        clear_processing_results()
+        st.info("📁 Upload JSON files to begin processing.")
+        st.markdown("""
+        **🎯 How it works:**
+        1. **📁 Upload Files**: Upload multiple JSON files (can have same generic filename)
+        2. **🏢 Extract Names**: Business names automatically extracted from account data
+        3. **✏️ Review & Edit**: Choose extraction method and edit names as needed
+        4. **📊 Process**: Calculate income and processing amounts based on configured percentages
+        """)
+
+        st.subheader("🧽 Business Name Extraction Examples")
+        st.markdown("""
+        **The tool will automatically clean account names like:**
+        - `ABC Ltd Current Account` → `ABC Ltd`
+        - `XYZ COMPANY BUSINESS ACCOUNT` → `Xyz Company` 
+        - `My Restaurant Ltd - 12345` → `My Restaurant Ltd`
+        - `COFFEE SHOP LIMITED CURRENT` → `Coffee Shop Limited`
+        - `Bound Expenses` → `Bound Expenses` *(you can manually change to "Bound Studios Ltd")*
+        """)
+
+        with st.expander("📚 MCA Categories Reference"):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**💰 Revenue Categories:**")
+                st.markdown("• Income")
+                st.markdown("• Special Inflow")
+
+                st.markdown("**💳 Debt/Financing Categories:**") 
+                st.markdown("• Loans")
+                st.markdown("• Debt Repayments")
             
-            mapping_data.append({
-                'File': business_extractions[i]['filename'], 
-                'Business Name': business_name,
-                'Status': '✅ Ready' if business_name.strip() else '⚠️ Missing Name'
+            with col2:
+                st.markdown("**💸 Expense Categories:**")
+                st.markdown("• Expenses")
+                st.markdown("• Special Outflow")
+                
+                st.markdown("**❌ Other Categories:**")
+                st.markdown("• Failed Payment")
+                st.markdown("• Uncategorised")
+        return
+
+    current_signature = get_uploaded_files_signature(uploaded_files)
+    if st.session_state.get('upload_signature') not in (None, current_signature):
+        clear_processing_results()
+
+    st.subheader("Business Name Extraction & Configuration")
+
+    business_extractions = []
+    for i, file in enumerate(uploaded_files):
+        try:
+            file.seek(0)
+            json_data = json.load(file)
+            file.seek(0)
+
+            extracted_name, account_options, account_info = extract_business_name_from_json(json_data, file.name)
+
+            business_extractions.append({
+                'file_index': i,
+                'filename': file.name,
+                'extracted_name': extracted_name,
+                'account_options': account_options,
+                'account_info': account_info,
+                'has_multiple_accounts': len(account_options) > 1
             })
-        
-        mapping_df = pd.DataFrame(mapping_data)
-        st.dataframe(mapping_df, use_container_width=True)
-        
-        if not all_names_valid:
-            st.warning("⚠️ Please ensure all business names are filled in before processing.")
-            return
-        
-        # Date range selection
-        st.subheader("⏰ Time Period Selection")
-        
-        period_type = st.selectbox(
-            "Period Type",
-            ["Today", "This Week", "This Month", "Last 30 Days", "Custom Range"]
-        )
-        
-        if period_type == "Custom Range":
-            st.markdown("**Custom Date Range:**")
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                start_date_str = st.text_input(
-                    "Start Date (YYYY-MM-DD)",
-                    value=date.today().replace(month=1, day=1).strftime("%Y-%m-%d"),
-                    help="Enter date in YYYY-MM-DD format"
-                )
-                try:
-                    start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
-                except:
-                    st.error("Invalid start date format. Use YYYY-MM-DD")
-                    return
-                    
-            with col2:
-                end_date_str = st.text_input(
-                    "End Date (YYYY-MM-DD)",
-                    value=date.today().strftime("%Y-%m-%d"),
-                    help="Enter date in YYYY-MM-DD format"
-                )
-                try:
-                    end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
-                except:
-                    st.error("Invalid end date format. Use YYYY-MM-DD")
-                    return
-        elif period_type == "Today":
-            start_date = end_date = date.today()
-        elif period_type == "This Week":
-            today = date.today()
-            start_date = today - timedelta(days=today.weekday())
-            end_date = today
-        elif period_type == "This Month":
-            today = date.today()
-            start_date = today.replace(day=1)
-            end_date = today
-        elif period_type == "Last 30 Days":
-            end_date = date.today()
-            start_date = end_date - timedelta(days=30)
-        
-        if start_date > end_date:
-            st.error("Start date must be before end date")
-            return
-        
-        # Process files button
-        if st.button("🚀 Process All Files", type="primary"):
-            with st.spinner("Processing transaction files..."):
-                df = process_multiple_json_files(uploaded_files, business_name_mappings, start_date, end_date)
-            
-            if not df.empty:
-                # Store in session state
-                st.session_state.df = df.copy()
-                st.session_state.business_mappings = business_name_mappings
-                st.session_state.date_range = (start_date, end_date)
-                
-                # Get business processing percentages
-                businesses_df = get_all_businesses()
-                business_percentages = dict(zip(businesses_df['name'], businesses_df['processing_percentage']))
-                
-                # Calculate income analysis
-                st.subheader("💰 Income Analysis & Processing Calculations")
-                
-                # Filter for income transactions only
-                income_df = df[df['is_revenue'] == True].copy()
-                
-                if not income_df.empty:
-                    # Group by business and calculate totals
-                    business_summary = income_df.groupby('business_name').agg({
-                        'amount': lambda x: abs(x).sum(),  # Convert negative amounts to positive
-                        'transaction_id': 'count'
-                    }).round(2)
-                    business_summary.columns = ['Total Income', 'Transaction Count']
-                    
-                    # Add processing percentages and calculations
-                    business_summary['Processing %'] = business_summary.index.map(
-                        lambda x: business_percentages.get(x, 0.0)
-                    )
-                    business_summary['Amount to Process'] = (
-                        business_summary['Total Income'] * business_summary['Processing %'] / 100
-                    ).round(2)
-                    
-                    # Display summary
-                    st.dataframe(
-                        business_summary.style.format({
-                            'Total Income': '£{:,.2f}',
-                            'Amount to Process': '£{:,.2f}',
-                            'Processing %': '{:.1f}%'
-                        }),
-                        use_container_width=True
-                    )
-                    
-                    # Overall totals
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.metric("Total Businesses", len(business_summary))
-                    with col2:
-                        total_income = business_summary['Total Income'].sum()
-                        st.metric("Total Income", f"£{total_income:,.2f}")
-                    with col3:
-                        total_processing = business_summary['Amount to Process'].sum()
-                        st.metric("Total to Process", f"£{total_processing:,.2f}")
-                    with col4:
-                        avg_percentage = business_summary['Processing %'].mean()
-                        st.metric("Avg Processing %", f"{avg_percentage:.1f}%")
-                    
-                    # Save to processing history
-                    if st.button("💾 Save Processing Calculations", type="secondary"):
-                        period_start = start_date.isoformat()
-                        period_end = end_date.isoformat()
-                        
-                        for business_name, row in business_summary.iterrows():
-                            # Get or create business
-                            business_id = add_or_update_business(business_name, row['Processing %'])
-                            
-                            # Save history
-                            save_processing_history(
-                                business_id=business_id,
-                                date=date.today().isoformat(),
-                                income_amount=row['Total Income'],
-                                processing_amount=row['Amount to Process'],
-                                period_start=period_start,
-                                period_end=period_end
-                            )
-                        
-                        st.success("Processing calculations saved to database!")
-                    
-                    # Daily breakdown option
-                    if st.checkbox("📊 Show Daily Breakdown"):
-                        st.subheader("Daily Income Breakdown")
-                        
-                        # Convert date column to datetime for grouping
-                        income_df['date'] = pd.to_datetime(income_df['date']).dt.date
-                        
-                        daily_breakdown = income_df.groupby(['business_name', 'date']).agg({
-                            'amount': lambda x: abs(x).sum()
-                        }).round(2)
-                        daily_breakdown.columns = ['Daily Income']
-                        
-                        # Add processing calculations
-                        daily_breakdown = daily_breakdown.reset_index()
-                        daily_breakdown['Processing %'] = daily_breakdown['business_name'].map(
-                            lambda x: business_percentages.get(x, 0.0)
-                        )
-                        daily_breakdown['Amount to Process'] = (
-                            daily_breakdown['Daily Income'] * daily_breakdown['Processing %'] / 100
-                        ).round(2)
-                        
-                        # Pivot for better display
-                        daily_pivot = daily_breakdown.pivot(
-                            index='date', 
-                            columns='business_name', 
-                            values='Amount to Process'
-                        ).fillna(0)
-                        
-                        st.dataframe(
-                            daily_pivot.style.format('£{:,.2f}'),
-                            use_container_width=True
-                        )
-                    
-                    # Export options
-                    st.subheader("📤 Export Options")
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        # Export business summary
-                        if st.button("📊 Export Business Summary", key="export_summary_btn"):
-                            csv_data = business_summary.to_csv()
-                            st.download_button(
-                                label="⬇️ Download Business Summary CSV",
-                                data=csv_data,
-                                file_name=f"business_processing_summary_{start_date}_{end_date}.csv",
-                                mime="text/csv",
-                                key="download_summary"
-                            )
-                    
-                    with col2:
-                        # Export all income transactions
-                        if st.button("📋 Export Income Transactions", key="export_transactions_btn"):
-                            export_df = income_df[[
-                                'business_name', 'date', 'name', 'amount', 'mca_subcategory',
-                                'account_name', 'transaction_id'
-                            ]].copy()
-                            
-                            csv_data = export_df.to_csv(index=False)
-                            st.download_button(
-                                label="⬇️ Download Income Transactions CSV",
-                                data=csv_data,
-                                file_name=f"income_transactions_{start_date}_{end_date}.csv",
-                                mime="text/csv",
-                                key="download_transactions"
-                            )
-                    
-                    # Alternative: Direct download buttons
-                    st.markdown("---")
-                    st.markdown("**📥 Direct Downloads:**")
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        # Business summary direct download
-                        summary_csv = business_summary.to_csv()
-                        st.download_button(
-                            label="📊 Business Summary CSV",
-                            data=summary_csv,
-                            file_name=f"business_summary_{start_date}_{end_date}.csv",
-                            mime="text/csv",
-                            key="direct_summary_download"
-                        )
-                    
-                    with col2:
-                        # Transactions direct download
-                        transactions_export_df = income_df[[
-                            'business_name', 'date', 'name', 'amount', 'mca_subcategory',
-                            'account_name', 'transaction_id', 'merchant_name'
-                        ]].copy()
-                        transactions_csv = transactions_export_df.to_csv(index=False)
-                        
-                        st.download_button(
-                            label="📋 Income Transactions CSV",
-                            data=transactions_csv,
-                            file_name=f"income_transactions_{start_date}_{end_date}.csv",
-                            mime="text/csv",
-                            key="direct_transactions_download"
-                        )
-                else:
-                    st.warning("No income transactions found in the selected time period.")
-                
-                # Show businesses that need configuration
-                unique_businesses = set(df['business_name'].unique())
-                configured_businesses = set(business_percentages.keys())
-                unconfigured = unique_businesses - configured_businesses
-                
-                if unconfigured:
-                    st.warning(f"⚠️ The following businesses need processing percentages configured: {', '.join(unconfigured)}")
-                    st.info("💡 Go to the **Business Management** tab to set processing percentages.")
-            
-            else:
-                st.error("No valid transaction data found in uploaded files.")
-    else:
-        st.info("📁 Upload JSON files to begin processing.")
-        st.markdown("""
-        **🎯 How it works:**
-        1. **📁 Upload Files**: Upload multiple JSON files (can have same generic filename)
-        2. **🏢 Extract Names**: Business names automatically extracted from account data
-        3. **✏️ Review & Edit**: Choose extraction method and edit names as needed
-        4. **📊 Process**: Calculate income and processing amounts based on configured percentages
-        """)
-        
-        st.subheader("🧽 Business Name Extraction Examples")
-        st.markdown("""
-        **The tool will automatically clean account names like:**
-        - `ABC Ltd Current Account` → `ABC Ltd`
-        - `XYZ COMPANY BUSINESS ACCOUNT` → `Xyz Company` 
-        - `My Restaurant Ltd - 12345` → `My Restaurant Ltd`
-        - `COFFEE SHOP LIMITED CURRENT` → `Coffee Shop Limited`
-        - `Bound Expenses` → `Bound Expenses` *(you can manually change to "Bound Studios Ltd")*
-        """)
-        
-        # Show sample of MCA categories
-        with st.expander("📚 MCA Categories Reference"):
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("**💰 Revenue Categories:**")
-                st.markdown("• Income")
-                st.markdown("• Special Inflow")
-                
-                st.markdown("**💳 Debt/Financing Categories:**") 
-                st.markdown("• Loans")
-                st.markdown("• Debt Repayments")
-            
-            with col2:
-                st.markdown("**💸 Expense Categories:**")
-                st.markdown("• Expenses")
-                st.markdown("• Special Outflow")
-                
-                st.markdown("**❌ Other Categories:**")
-                st.markdown("• Failed Payment")
-                st.markdown("• Uncategorised")
-        st.info("📁 Upload JSON files to begin processing.")
-        st.markdown("""
-        **🎯 How it works:**
-        1. **📁 Upload Files**: Upload multiple JSON files (can have same generic filename)
-        2. **🏢 Extract Names**: Business names automatically extracted from account data
-        3. **✏️ Review & Edit**: Choose extraction method and edit names as needed
-        4. **📊 Process**: Calculate income and processing amounts based on configured percentages
-        """)
-        
-        st.subheader("🧽 Business Name Extraction Examples")
-        st.markdown("""
-        **The tool will automatically clean account names like:**
-        - `ABC Ltd Current Account` → `ABC Ltd`
-        - `XYZ COMPANY BUSINESS ACCOUNT` → `Xyz Company` 
-        - `My Restaurant Ltd - 12345` → `My Restaurant Ltd`
-        - `COFFEE SHOP LIMITED CURRENT` → `Coffee Shop Limited`
-        - `Bound Expenses` → `Bound Expenses` *(you can manually change to "Bound Studios Ltd")*
-        """)
-        
-        # Show sample of MCA categories
-        with st.expander("📚 MCA Categories Reference"):
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("**💰 Revenue Categories:**")
-                st.markdown("• Income")
-                st.markdown("• Special Inflow")
-                
-                st.markdown("**💳 Debt/Financing Categories:**") 
-                st.markdown("• Loans")
-                st.markdown("• Debt Repayments")
-            
-            with col2:
-                st.markdown("**💸 Expense Categories:**")
-                st.markdown("• Expenses")
-                st.markdown("• Special Outflow")
-                
-                st.markdown("**❌ Other Categories:**")
-                st.markdown("• Failed Payment")
-                st.markdown("• Uncategorised")
+        except Exception as e:
+            st.error(f"Error reading {file.name}: {e}")
+            fallback_name = extract_business_name_from_filename(file.name)
+            business_extractions.append({
+                'file_index': i,
+                'filename': file.name,
+                'extracted_name': fallback_name,
+                'account_options': [fallback_name],
+                'account_info': {},
+                'has_multiple_accounts': False
+            })
+
+    business_name_mappings = create_business_name_mapping_interface(business_extractions)
+
+    st.subheader("📋 Final Business Mapping Summary")
+    mapping_data = []
+    all_names_valid = True
+
+    for i in range(len(uploaded_files)):
+        business_name = business_name_mappings.get(i, "")
+        if not business_name.strip():
+            all_names_valid = False
+
+        mapping_data.append({
+            'File': business_extractions[i]['filename'], 
+            'Business Name': business_name,
+            'Status': '✅ Ready' if business_name.strip() else '⚠️ Missing Name'
+        })
+
+    mapping_df = pd.DataFrame(mapping_data)
+    st.dataframe(mapping_df, use_container_width=True)
+
+    if not all_names_valid:
+        st.warning("⚠️ Please ensure all business names are filled in before processing.")
+        clear_processing_results()
+        return
+
+    st.subheader("⏰ Time Period Selection")
+
+    period_type = st.selectbox(
+        "Period Type",
+        ["Today", "This Week", "This Month", "Last 30 Days", "Custom Range"]
+    )
+
+    if period_type == "Custom Range":
+        st.markdown("**Custom Date Range:**")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            start_date_str = st.text_input(
+                "Start Date (YYYY-MM-DD)",
+                value=date.today().replace(month=1, day=1).strftime("%Y-%m-%d"),
+                help="Enter date in YYYY-MM-DD format"
+            )
+            try:
+                start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+            except ValueError:
+                st.error("Invalid start date format. Use YYYY-MM-DD")
+                clear_processing_results()
+                return
+
+        with col2:
+            end_date_str = st.text_input(
+                "End Date (YYYY-MM-DD)",
+                value=date.today().strftime("%Y-%m-%d"),
+                help="Enter date in YYYY-MM-DD format"
+            )
+            try:
+                end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+            except ValueError:
+                st.error("Invalid end date format. Use YYYY-MM-DD")
+                clear_processing_results()
+                return
+    elif period_type == "Today":
+        start_date = end_date = date.today()
+    elif period_type == "This Week":
+        today = date.today()
+        start_date = today - timedelta(days=today.weekday())
+        end_date = today
+    elif period_type == "This Month":
+        today = date.today()
+        start_date = today.replace(day=1)
+        end_date = today
+    elif period_type == "Last 30 Days":
+        end_date = date.today()
+        start_date = end_date - timedelta(days=30)
+
+    if start_date > end_date:
+        st.error("Start date must be before end date")
+        clear_processing_results()
+        return
+
+    if st.button("🚀 Process All Files", type="primary"):
+        with st.spinner("Processing transaction files..."):
+            df = process_multiple_json_files(uploaded_files, business_name_mappings, start_date, end_date)
+
+        if not df.empty:
+            st.session_state.df = df.copy()
+            st.session_state.business_mappings = business_name_mappings
+            st.session_state.date_range = (start_date.isoformat(), end_date.isoformat())
+            st.session_state.upload_signature = current_signature
+        else:
+            clear_processing_results()
+            st.error("No valid transaction data found in uploaded files.")
+
+    stored_range = st.session_state.get('date_range')
+    stored_df = st.session_state.get('df')
+    if stored_df is not None and stored_range and st.session_state.get('upload_signature') == current_signature:
+        saved_start = datetime.strptime(stored_range[0], "%Y-%m-%d").date()
+        saved_end = datetime.strptime(stored_range[1], "%Y-%m-%d").date()
+        render_processing_results(stored_df, saved_start, saved_end)
 
 def processing_history_tab():
     """View processing history"""
