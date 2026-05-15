@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import date
 from unittest import mock
 
 import pandas as pd
@@ -38,6 +39,17 @@ class AppTests(unittest.TestCase):
         self.assertEqual(businesses.iloc[0]['name'], 'Beta Ltd')
         self.assertEqual(businesses.iloc[0]['processing_percentage'], 12.5)
 
+    def test_update_business_by_id_rejects_duplicate_name_and_keeps_db_usable(self):
+        alpha_id = app.add_or_update_business('Alpha Ltd', 10.0)
+        beta_id = app.add_or_update_business('Beta Ltd', 20.0)
+
+        with self.assertRaises(ValueError):
+            app.update_business_by_id(alpha_id, 'Beta Ltd', 30.0)
+
+        app.update_business_by_id(beta_id, 'Gamma Ltd', 25.0)
+        businesses = app.get_all_businesses()
+        self.assertEqual(set(businesses['name']), {'Alpha Ltd', 'Gamma Ltd'})
+
     def test_process_multiple_json_files_skips_bad_accounts_but_keeps_file(self):
         upload = DummyUpload(
             'sample.json',
@@ -67,6 +79,58 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(df), 1)
         self.assertEqual(df.iloc[0]['business_name'], 'Valid Business')
         self.assertTrue(df.iloc[0]['is_authorised_account'])
+
+    def test_process_multiple_json_files_accepts_numeric_string_amounts(self):
+        upload = DummyUpload(
+            'sample.json',
+            {
+                'accounts': [
+                    {'account_id': 'acct-1', 'name': 'Valid Account'},
+                ],
+                'transactions': [
+                    {
+                        'transaction_id': 'txn-1',
+                        'account_id': 'acct-1',
+                        'date': '2026-04-01',
+                        'name': 'Stripe payout',
+                        'merchant_name': 'Stripe',
+                        'amount': '-150.25',
+                    }
+                ],
+            },
+        )
+
+        with mock.patch.object(app.st, 'warning'), mock.patch.object(app.st, 'error'):
+            df = app.process_multiple_json_files([upload], {0: 'Valid Business'})
+
+        self.assertEqual(len(df), 1)
+        self.assertEqual(df.iloc[0]['amount'], -150.25)
+        self.assertEqual(df.iloc[0]['mca_subcategory'], 'Income')
+
+    def test_processing_inputs_signature_changes_with_mapping_and_dates(self):
+        upload = DummyUpload('sample.json', {'accounts': [], 'transactions': []})
+
+        first_signature = app.get_processing_inputs_signature(
+            [upload],
+            {0: 'Alpha Ltd'},
+            date(2026, 4, 1),
+            date(2026, 4, 30),
+        )
+        renamed_signature = app.get_processing_inputs_signature(
+            [upload],
+            {0: 'Beta Ltd'},
+            date(2026, 4, 1),
+            date(2026, 4, 30),
+        )
+        date_signature = app.get_processing_inputs_signature(
+            [upload],
+            {0: 'Alpha Ltd'},
+            date(2026, 4, 2),
+            date(2026, 4, 30),
+        )
+
+        self.assertNotEqual(first_signature, renamed_signature)
+        self.assertNotEqual(first_signature, date_signature)
 
     def test_credit_expense_keyword_is_not_forced_to_expenses(self):
         category = app.map_transaction_category({

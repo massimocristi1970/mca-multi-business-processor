@@ -169,18 +169,33 @@ def add_or_update_business(name: str, processing_percentage: float) -> int:
 
 def update_business_by_id(business_id: int, name: str, processing_percentage: float) -> int:
     """Update an existing business by ID, preserving identity across renames."""
-    conn = sqlite3.connect(DATABASE_FILE)
-    cursor = conn.cursor()
+    name = name.strip()
+    if not name:
+        raise ValueError("Business name cannot be blank.")
 
     current_time = datetime.now().isoformat()
-    cursor.execute('''
-        UPDATE businesses
-        SET name = ?, processing_percentage = ?, updated_date = ?
-        WHERE id = ?
-    ''', (name, processing_percentage, current_time, business_id))
+    conn = sqlite3.connect(DATABASE_FILE)
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id FROM businesses
+            WHERE name = ? AND id != ?
+        ''', (name, business_id))
+        if cursor.fetchone():
+            raise ValueError(f"Business name '{name}' already exists.")
 
-    conn.commit()
-    conn.close()
+        cursor.execute('''
+            UPDATE businesses
+            SET name = ?, processing_percentage = ?, updated_date = ?
+            WHERE id = ?
+        ''', (name, processing_percentage, current_time, business_id))
+        if cursor.rowcount == 0:
+            raise ValueError("Business no longer exists.")
+
+        conn.commit()
+    finally:
+        conn.close()
+
     return business_id
 
 def save_processing_history(business_id: int, date: str, income_amount: float, 
@@ -376,10 +391,233 @@ def get_uploaded_files_signature(uploaded_files):
         for uploaded_file in uploaded_files
     )
 
+def get_processing_inputs_signature(uploaded_files, business_name_mappings, start_date, end_date):
+    """Create a signature for inputs that affect processed results."""
+    return (
+        get_uploaded_files_signature(uploaded_files),
+        tuple(sorted((file_index, name.strip()) for file_index, name in business_name_mappings.items())),
+        start_date.isoformat(),
+        end_date.isoformat(),
+    )
+
 def clear_processing_results():
     """Clear cached processing results when uploads change or are removed."""
-    for key in ("df", "business_mappings", "date_range", "upload_signature"):
+    for key in ("df", "business_mappings", "date_range", "upload_signature", "processing_inputs_signature"):
         st.session_state.pop(key, None)
+
+def apply_professional_theme():
+    """Apply a polished dark Streamlit theme."""
+    st.markdown(
+        """
+        <style>
+        :root {
+            --bg: #0b0f17;
+            --panel: #111827;
+            --panel-soft: #151f2e;
+            --line: #263244;
+            --line-strong: #334155;
+            --text: #e5e7eb;
+            --muted: #94a3b8;
+            --accent: #38bdf8;
+            --accent-strong: #0ea5e9;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+        }
+
+        .stApp {
+            background:
+                radial-gradient(circle at 20% 0%, rgba(56, 189, 248, 0.12), transparent 28rem),
+                linear-gradient(180deg, #0b0f17 0%, #0f172a 100%);
+            color: var(--text);
+        }
+
+        .block-container {
+            max-width: 1400px;
+            padding-top: 2rem;
+            padding-bottom: 4rem;
+        }
+
+        [data-testid="stSidebar"] {
+            background: #090d14;
+            border-right: 1px solid var(--line);
+        }
+
+        [data-testid="stSidebar"] * {
+            color: var(--text);
+        }
+
+        h1, h2, h3 {
+            color: #f8fafc;
+            letter-spacing: 0;
+        }
+
+        h1 {
+            font-size: 2.1rem;
+            font-weight: 750;
+            margin-bottom: 0.2rem;
+        }
+
+        h2, h3 {
+            font-weight: 680;
+        }
+
+        p, li, label, [data-testid="stCaptionContainer"] {
+            color: var(--muted);
+        }
+
+        .app-kicker {
+            color: var(--accent);
+            font-size: 0.78rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            margin-bottom: 0.35rem;
+        }
+
+        .app-subtitle {
+            color: var(--muted);
+            font-size: 1rem;
+            margin-bottom: 1.4rem;
+        }
+
+        .section-panel {
+            background: rgba(17, 24, 39, 0.72);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            padding: 1rem 1.1rem;
+            margin: 0.6rem 0 1rem 0;
+        }
+
+        .section-label {
+            color: var(--muted);
+            font-size: 0.78rem;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            margin-bottom: 0.2rem;
+        }
+
+        .section-title {
+            color: #f8fafc;
+            font-size: 1.1rem;
+            font-weight: 700;
+            margin-bottom: 0.2rem;
+        }
+
+        [data-testid="stMetric"] {
+            background: rgba(17, 24, 39, 0.74);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            padding: 0.95rem 1rem;
+        }
+
+        [data-testid="stMetricLabel"] p {
+            color: var(--muted);
+            font-size: 0.78rem;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+
+        [data-testid="stMetricValue"] {
+            color: #f8fafc;
+            font-weight: 750;
+        }
+
+        div[data-testid="stTabs"] button {
+            color: var(--muted);
+            border-radius: 8px 8px 0 0;
+            font-weight: 650;
+        }
+
+        div[data-testid="stTabs"] button[aria-selected="true"] {
+            color: #f8fafc;
+            background: rgba(56, 189, 248, 0.10);
+        }
+
+        div[data-testid="stTabs"] [data-baseweb="tab-highlight"] {
+            background-color: var(--accent);
+        }
+
+        .stButton > button,
+        .stDownloadButton > button,
+        [data-testid="stFormSubmitButton"] button {
+            border-radius: 8px;
+            border: 1px solid var(--line-strong);
+            background: #172033;
+            color: #f8fafc;
+            font-weight: 700;
+            min-height: 2.7rem;
+        }
+
+        .stButton > button:hover,
+        .stDownloadButton > button:hover,
+        [data-testid="stFormSubmitButton"] button:hover {
+            border-color: var(--accent);
+            color: #f8fafc;
+            background: #1f2a44;
+        }
+
+        .stButton > button[kind="primary"],
+        [data-testid="stFormSubmitButton"] button[kind="primary"] {
+            background: linear-gradient(135deg, var(--accent-strong), #2563eb);
+            border-color: rgba(125, 211, 252, 0.7);
+            box-shadow: 0 12px 28px rgba(14, 165, 233, 0.18);
+        }
+
+        [data-testid="stFileUploader"] {
+            background: rgba(17, 24, 39, 0.72);
+            border: 1px dashed var(--line-strong);
+            border-radius: 8px;
+            padding: 0.8rem;
+        }
+
+        [data-testid="stDataFrame"],
+        [data-testid="stDataEditor"] {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        div[data-baseweb="input"],
+        div[data-baseweb="select"],
+        textarea {
+            background-color: #0f172a;
+            border-color: var(--line-strong);
+            border-radius: 8px;
+        }
+
+        .stAlert {
+            border-radius: 8px;
+            border: 1px solid var(--line);
+        }
+
+        hr {
+            border-color: var(--line);
+        }
+
+        #MainMenu,
+        footer,
+        header[data-testid="stHeader"] {
+            visibility: hidden;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def render_section_intro(label: str, title: str, description: str):
+    """Render a compact section heading."""
+    st.markdown(
+        f"""
+        <div class="section-panel">
+            <div class="section-label">{label}</div>
+            <div class="section-title">{title}</div>
+            <div class="app-subtitle" style="margin-bottom: 0;">{description}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 def calculate_business_summary(df: pd.DataFrame, business_percentages: dict) -> pd.DataFrame:
     """Summarize income and processing totals by business."""
@@ -406,7 +644,11 @@ def render_processing_results(df: pd.DataFrame, start_date: date, end_date: date
     businesses_df = get_all_businesses()
     business_percentages = dict(zip(businesses_df['name'], businesses_df['processing_percentage']))
 
-    st.subheader("💰 Income Analysis & Processing Calculations")
+    render_section_intro(
+        "Results",
+        "Income Analysis & Processing Calculations",
+        "Review the processing totals, inspect daily movement, then save or export the figures."
+    )
 
     income_df = df[df['is_revenue'] == True].copy()
     business_summary = calculate_business_summary(df, business_percentages)
@@ -452,7 +694,11 @@ def render_processing_results(df: pd.DataFrame, start_date: date, end_date: date
             st.success("Processing calculations saved to database!")
 
         if st.checkbox("📊 Show Daily Breakdown", key="show_daily_breakdown"):
-            st.subheader("Daily Income Breakdown")
+            render_section_intro(
+                "Breakdown",
+                "Daily Income Breakdown",
+                "Amounts to process by business and transaction date."
+            )
 
             income_df['date'] = pd.to_datetime(income_df['date']).dt.date
             daily_breakdown = income_df.groupby(['business_name', 'date']).agg({
@@ -566,9 +812,11 @@ def process_multiple_json_files(uploaded_files, business_name_mappings, start_da
                     amount = pd.to_numeric(txn.get('amount'), errors='coerce')
                     if pd.isna(amount):
                         raise ValueError("missing or invalid amount")
+                    normalized_txn = dict(txn)
+                    normalized_txn['amount'] = float(amount)
                     
                     # Apply your MCA categorization logic
-                    mca_subcategory = categorize_transaction(txn)
+                    mca_subcategory = categorize_transaction(normalized_txn)
                     
                     # Determine flags based on subcategory
                     is_revenue = mca_subcategory in ['Income', 'Special Inflow']
@@ -608,14 +856,18 @@ def process_multiple_json_files(uploaded_files, business_name_mappings, start_da
 
 def business_management_tab():
     """Business management interface"""
-    st.header("Business Management")
+    render_section_intro(
+        "Configuration",
+        "Business Management",
+        "Maintain configured businesses and processing percentages."
+    )
     
     businesses_df = get_all_businesses()
     
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        st.subheader("Current Businesses")
+        st.subheader("Configured Businesses")
         if not businesses_df.empty:
             edited_df = st.data_editor(
                 businesses_df[['id', 'name', 'processing_percentage']],
@@ -637,10 +889,23 @@ def business_management_tab():
             )
             
             if st.button("Save Changes", type="primary"):
-                for _, row in edited_df.iterrows():
-                    update_business_by_id(int(row['id']), str(row['name']).strip(), float(row['processing_percentage']))
-                st.success("Business settings updated!")
-                st.rerun()
+                try:
+                    seen_names = set()
+                    for _, row in edited_df.iterrows():
+                        business_name = str(row['name']).strip()
+                        normalized_name = business_name.lower()
+                        if not business_name:
+                            raise ValueError("Business names cannot be blank.")
+                        if normalized_name in seen_names:
+                            raise ValueError(f"Duplicate business name in editor: '{business_name}'.")
+                        seen_names.add(normalized_name)
+
+                    for _, row in edited_df.iterrows():
+                        update_business_by_id(int(row['id']), str(row['name']).strip(), float(row['processing_percentage']))
+                    st.success("Business settings updated!")
+                    st.rerun()
+                except ValueError as error:
+                    st.error(str(error))
         else:
             st.info("No businesses configured yet. Add your first business below.")
     
@@ -703,8 +968,11 @@ def extract_business_name_from_json(json_data, filename=""):
 def create_business_name_mapping_interface(business_extractions):
     """Create enhanced business name mapping interface with existing business dropdown"""
     
-    st.markdown("**Review and confirm business names extracted from account data:**")
-    st.info("💡 **Tip**: You can use extracted names, choose from account options, select from existing businesses, or enter manually.")
+    render_section_intro(
+        "Step 2",
+        "Confirm Business Mapping",
+        "Match each upload to the business name used for processing rates and reporting."
+    )
     
     # Get existing businesses for dropdown
     existing_businesses_df = get_all_businesses()
@@ -713,7 +981,7 @@ def create_business_name_mapping_interface(business_extractions):
     business_name_mappings = {}
     
     for extraction in business_extractions:
-        st.markdown("---")
+        st.divider()
         col1, col2 = st.columns([1, 2])
         
         with col1:
@@ -838,7 +1106,11 @@ def create_business_name_mapping_interface(business_extractions):
 
 def processing_analysis_tab():
     """Main processing and analysis interface with enhanced JSON content extraction"""
-    st.header("Multi-Business Transaction Processing")
+    render_section_intro(
+        "Step 1",
+        "Transaction Upload",
+        "Upload one or more JSON transaction files. Business names are extracted from account data."
+    )
     
     uploaded_files = st.file_uploader(
         "Upload Business Transaction JSON Files", 
@@ -849,24 +1121,21 @@ def processing_analysis_tab():
 
     if not uploaded_files:
         clear_processing_results()
-        st.info("📁 Upload JSON files to begin processing.")
-        st.markdown("""
-        **🎯 How it works:**
-        1. **📁 Upload Files**: Upload multiple JSON files (can have same generic filename)
-        2. **🏢 Extract Names**: Business names automatically extracted from account data
-        3. **✏️ Review & Edit**: Choose extraction method and edit names as needed
-        4. **📊 Process**: Calculate income and processing amounts based on configured percentages
-        """)
+        st.info("Upload JSON files to begin processing.")
 
-        st.subheader("🧽 Business Name Extraction Examples")
-        st.markdown("""
-        **The tool will automatically clean account names like:**
-        - `ABC Ltd Current Account` → `ABC Ltd`
-        - `XYZ COMPANY BUSINESS ACCOUNT` → `Xyz Company` 
-        - `My Restaurant Ltd - 12345` → `My Restaurant Ltd`
-        - `COFFEE SHOP LIMITED CURRENT` → `Coffee Shop Limited`
-        - `Bound Expenses` → `Bound Expenses` *(you can manually change to "Bound Studios Ltd")*
-        """)
+        col1, col2 = st.columns(2)
+        with col1:
+            render_section_intro(
+                "Workflow",
+                "Upload, Map, Process",
+                "Add files, confirm each business name, choose a period, then calculate processing totals."
+            )
+        with col2:
+            render_section_intro(
+                "Extraction",
+                "Account Names Are Cleaned",
+                "`ABC Ltd Current Account` becomes `ABC Ltd`; manual edits are available before processing."
+            )
 
         with st.expander("📚 MCA Categories Reference"):
             col1, col2 = st.columns(2)
@@ -892,8 +1161,6 @@ def processing_analysis_tab():
     current_signature = get_uploaded_files_signature(uploaded_files)
     if st.session_state.get('upload_signature') not in (None, current_signature):
         clear_processing_results()
-
-    st.subheader("Business Name Extraction & Configuration")
 
     business_extractions = []
     for i, file in enumerate(uploaded_files):
@@ -926,7 +1193,11 @@ def processing_analysis_tab():
 
     business_name_mappings = create_business_name_mapping_interface(business_extractions)
 
-    st.subheader("📋 Final Business Mapping Summary")
+    render_section_intro(
+        "Step 3",
+        "Mapping Summary",
+        "Confirm all files are ready before selecting the processing period."
+    )
     mapping_data = []
     all_names_valid = True
 
@@ -949,7 +1220,11 @@ def processing_analysis_tab():
         clear_processing_results()
         return
 
-    st.subheader("⏰ Time Period Selection")
+    render_section_intro(
+        "Step 4",
+        "Processing Period",
+        "Choose the transaction window to include in this run."
+    )
 
     period_type = st.selectbox(
         "Period Type",
@@ -1004,6 +1279,15 @@ def processing_analysis_tab():
         clear_processing_results()
         return
 
+    processing_inputs_signature = get_processing_inputs_signature(
+        uploaded_files,
+        business_name_mappings,
+        start_date,
+        end_date
+    )
+    if st.session_state.get('processing_inputs_signature') not in (None, processing_inputs_signature):
+        clear_processing_results()
+
     if st.button("🚀 Process All Files", type="primary"):
         with st.spinner("Processing transaction files..."):
             df = process_multiple_json_files(uploaded_files, business_name_mappings, start_date, end_date)
@@ -1013,20 +1297,29 @@ def processing_analysis_tab():
             st.session_state.business_mappings = business_name_mappings
             st.session_state.date_range = (start_date.isoformat(), end_date.isoformat())
             st.session_state.upload_signature = current_signature
+            st.session_state.processing_inputs_signature = processing_inputs_signature
         else:
             clear_processing_results()
             st.error("No valid transaction data found in uploaded files.")
 
     stored_range = st.session_state.get('date_range')
     stored_df = st.session_state.get('df')
-    if stored_df is not None and stored_range and st.session_state.get('upload_signature') == current_signature:
+    if (
+        stored_df is not None
+        and stored_range
+        and st.session_state.get('processing_inputs_signature') == processing_inputs_signature
+    ):
         saved_start = datetime.strptime(stored_range[0], "%Y-%m-%d").date()
         saved_end = datetime.strptime(stored_range[1], "%Y-%m-%d").date()
         render_processing_results(stored_df, saved_start, saved_end)
 
 def processing_history_tab():
     """View processing history"""
-    st.header("Processing History")
+    render_section_intro(
+        "Archive",
+        "Processing History",
+        "Review saved calculations and export historical processing records."
+    )
     
     conn = sqlite3.connect(DATABASE_FILE)
     
@@ -1085,14 +1378,13 @@ def processing_history_tab():
             st.metric("Businesses Tracked", unique_businesses)
         
         # Export history
-        if st.button("Export Processing History"):
-            csv_data = history_df.to_csv(index=False)
-            st.download_button(
-                label="Download History CSV",
-                data=csv_data,
-                file_name=f"processing_history_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv"
-            )
+        csv_data = history_df.to_csv(index=False)
+        st.download_button(
+            label="Download History CSV",
+            data=csv_data,
+            file_name=f"processing_history_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv"
+        )
     else:
         st.info("No processing history found. Process some transactions first!")
 
@@ -1100,20 +1392,44 @@ def main():
     """
     Main Streamlit application
     """
+    st.set_page_config(
+        page_title="MCA Multi-Business Processing Tool",
+        page_icon="M",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+
+    apply_professional_theme()
+
     # Initialize database
     init_database()
     
-    st.set_page_config(
-        page_title="MCA Multi-Business Processing Tool",
-        page_icon="💼",
-        layout="wide"
+    st.markdown('<div class="app-kicker">Merchant Cash Advance</div>', unsafe_allow_html=True)
+    st.title("MCA Processing Console")
+    st.markdown(
+        '<div class="app-subtitle">Process multi-business transaction files, calculate repayment amounts, and keep a clean audit trail.</div>',
+        unsafe_allow_html=True
     )
-    
-    st.title("💼 MCA Multi-Business Processing Tool")
-    st.markdown("Process multiple business transaction files and calculate processing amounts based on pre-configured percentages.")
+
+    try:
+        businesses_df = get_all_businesses()
+        conn = sqlite3.connect(DATABASE_FILE)
+        history_count = pd.read_sql_query('SELECT COUNT(*) as count FROM processing_history', conn).iloc[0]['count']
+        conn.close()
+
+        stat1, stat2, stat3 = st.columns(3)
+        with stat1:
+            st.metric("Configured Businesses", len(businesses_df))
+        with stat2:
+            avg_rate = businesses_df['processing_percentage'].mean() if not businesses_df.empty else 0.0
+            st.metric("Average Processing Rate", f"{avg_rate:.1f}%")
+        with stat3:
+            st.metric("Saved Processing Records", int(history_count))
+    except Exception:
+        pass
     
     # Create tabs
-    tab1, tab2, tab3 = st.tabs(["📊 Processing & Analysis", "⚙️ Business Management", "📈 Processing History"])
+    tab1, tab2, tab3 = st.tabs(["Processing & Analysis", "Business Management", "Processing History"])
     
     with tab1:
         processing_analysis_tab()
@@ -1126,29 +1442,12 @@ def main():
     
     # Sidebar info
     with st.sidebar:
-        st.header("About")
+        st.header("MCA Console")
         st.markdown("""
-        **MCA Processing Tool Features:**
-        
-        📁 **Multi-File Upload**
-        - Upload multiple JSON files
-        - Auto-extract business names from account data
-        
-        ⚙️ **Business Configuration**
-        - Set processing percentages per business
-        - Persistent storage in SQLite database
-        
-        📊 **Income Analysis**
-        - Calculate processing amounts automatically
-        - Daily/period breakdowns
-        - Export summaries and transaction details
-        
-        📈 **Processing History**
-        - Track historical processing calculations
-        - View trends and summaries
+        A focused workspace for transaction uploads, business processing rates, and saved calculation history.
         """)
         
-        st.header("Quick Stats")
+        st.header("System Status")
         
         # Show database stats
         try:
