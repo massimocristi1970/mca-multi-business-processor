@@ -132,6 +132,22 @@ class AppTests(unittest.TestCase):
         self.assertNotEqual(first_signature, renamed_signature)
         self.assertNotEqual(first_signature, date_signature)
 
+    def test_multi_account_json_prefers_filename_business_name(self):
+        extracted_name, account_options, _ = app.extract_business_name_from_json(
+            {
+                'accounts': [
+                    {'account_id': 'acct-1', 'name': 'Saving Challenge (2026)', 'subtype': 'savings'},
+                    {'account_id': 'acct-2', 'name': 'Savings', 'subtype': 'savings'},
+                    {'account_id': 'acct-3', 'name': 'CurrentAccount 3267', 'subtype': 'checking'},
+                ],
+                'transactions': [],
+            },
+            'Upper6th Consultancy Limited.json',
+        )
+
+        self.assertEqual(extracted_name, 'Upper6th Consultancy Limited')
+        self.assertIn('Saving Challenge (2026)', account_options)
+
     def test_credit_expense_keyword_is_not_forced_to_expenses(self):
         category = app.map_transaction_category({
             'name': 'HMRC VAT REFUND',

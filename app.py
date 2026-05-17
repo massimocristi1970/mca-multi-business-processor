@@ -974,9 +974,11 @@ def business_management_tab():
 def extract_business_name_from_json(json_data, filename=""):
     """Extract business name from JSON account data with multi-account handling"""
     accounts = json_data.get('accounts', [])
+    filename_business_name = extract_business_name_from_filename(filename) if filename else ""
     
     if not accounts:
-        return f"Unknown Business ({filename})", [], {}
+        fallback_name = filename_business_name or f"Unknown Business ({filename})"
+        return fallback_name, [], {}
     
     # Get all unique account names with their details
     account_info = {}
@@ -1004,8 +1006,11 @@ def extract_business_name_from_json(json_data, filename=""):
         # Single account - use it directly after cleaning
         return clean_account_name(account_names[0]), account_names, account_info
     else:
-        # Multiple accounts - return first one as default, but provide options
-        return clean_account_name(account_names[0]), account_names, account_info
+        # Multiple accounts often contain generic labels like "Savings" or
+        # "CurrentAccount 1234", so prefer the upload filename as the default.
+        extracted_name = filename_business_name or clean_account_name(account_names[0])
+        account_options = [extracted_name] + [name for name in account_names if name != extracted_name]
+        return extracted_name, account_options, account_info
 
 def create_business_name_mapping_interface(business_extractions):
     """Create enhanced business name mapping interface with existing business dropdown"""
