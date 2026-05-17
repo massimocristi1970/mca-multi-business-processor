@@ -142,6 +142,88 @@ class AppTests(unittest.TestCase):
 
         self.assertNotEqual(category, 'Expenses')
 
+    def test_categorizer_matches_mcav2_edge_cases(self):
+        cases = [
+            (
+                {
+                    'name': 'STRIPE REVERSAL',
+                    'merchant_name': '',
+                    'amount': -100.0,
+                    'personal_finance_category.detailed': 'income_other_income',
+                },
+                'Failed Payment',
+            ),
+            (
+                {
+                    'name': 'Transfer from savings',
+                    'merchant_name': '',
+                    'amount': -250.0,
+                    'personal_finance_category.detailed': 'transfer_in_account_transfer',
+                },
+                'Transfer In',
+            ),
+            (
+                {
+                    'name': 'Director loan capital introduced',
+                    'merchant_name': '',
+                    'amount': -250.0,
+                    'personal_finance_category.detailed': '',
+                },
+                'Funding Inflow',
+            ),
+            (
+                {
+                    'name': 'Monthly account fee',
+                    'merchant_name': '',
+                    'amount': 25.0,
+                    'personal_finance_category.detailed': '',
+                },
+                'Bank Charge',
+            ),
+            (
+                {
+                    'name': 'Amazon refund',
+                    'merchant_name': '',
+                    'amount': -30.0,
+                    'personal_finance_category.detailed': 'general_merchandise_books_and_supplies',
+                },
+                'Special Inflow',
+            ),
+        ]
+
+        for transaction, expected_category in cases:
+            with self.subTest(transaction=transaction['name']):
+                self.assertEqual(app.map_transaction_category(transaction), expected_category)
+
+    def test_process_multiple_json_files_uses_mcav2_revenue_flags(self):
+        upload = DummyUpload(
+            'sample.json',
+            {
+                'accounts': [
+                    {'account_id': 'acct-1', 'name': 'Valid Account'},
+                ],
+                'transactions': [
+                    {
+                        'transaction_id': 'txn-1',
+                        'account_id': 'acct-1',
+                        'date': '2026-04-01',
+                        'name': 'Transfer from savings',
+                        'merchant_name': '',
+                        'amount': -250.0,
+                        'personal_finance_category.detailed': 'transfer_in_account_transfer',
+                    },
+                ],
+            },
+        )
+
+        with mock.patch.object(app.st, 'warning'), mock.patch.object(app.st, 'error'):
+            df = app.process_multiple_json_files([upload], {0: 'Valid Business'})
+
+        self.assertEqual(df.iloc[0]['mca_subcategory'], 'Transfer In')
+        self.assertFalse(bool(df.iloc[0]['is_revenue']))
+        self.assertTrue(bool(df.iloc[0]['is_transfer_in']))
+        self.assertTrue(bool(df.iloc[0]['is_internal_transfer']))
+
     def test_calculate_business_summary_uses_absolute_income(self):
         df = pd.DataFrame([
             {'business_name': 'Alpha Ltd', 'amount': -100.0, 'transaction_id': '1', 'is_revenue': True},

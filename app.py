@@ -5,6 +5,7 @@ import re
 import sqlite3
 from datetime import datetime, date, timedelta
 import os
+from transaction_categorizer import TransactionCategorizer
 
 # Database setup
 DATABASE_FILE = "mca_business_data.db"
@@ -224,154 +225,28 @@ def save_processing_history(business_id: int, date: str, income_amount: float,
 MCA_CATEGORIES = [
     'Income',
     'Special Inflow', 
+    'Transfer In',
+    'Transfer Out',
+    'Funding Inflow',
     'Loans',
     'Debt Repayments',
     'Expenses',
     'Special Outflow',
+    'Bank Charge',
     'Failed Payment',
     'Uncategorised'
 ]
 
+_TRANSACTION_CATEGORIZER = TransactionCategorizer()
+
 def map_transaction_category(transaction):
-    """Enhanced transaction categorization matching your business lending scorecard version"""
-    name = transaction.get("name", "")
-    if isinstance(name, list):
-        name = " ".join(map(str, name))
-    else:
-        name = str(name)
-    name = name.lower()
-
-    description = transaction.get("merchant_name", "")
-    if isinstance(description, list):
-        description = " ".join(map(str, description))
-    else:
-        description = str(description)
-    description = description.lower()
-
-    category = transaction.get("personal_finance_category.detailed", "")
-    if isinstance(category, list):
-        category = " ".join(map(str, category))
-    else:
-        category = str(category)
-    category = category.lower().strip().replace(" ", "_")
-
-    amount = transaction.get("amount", 0)
-    combined_text = f"{name} {description}"
-
-    is_credit = amount < 0
-    is_debit = amount > 0
-
-    # Step 1: Custom keyword overrides
-    if is_credit and re.search(
-        r"(?i)\b("
-        r"stripe|sumup|zettle|square|take\s*payments|shopify|card\s+settlement|daily\s+takings|payout"
-        r"|paypal|go\s*cardless|klarna|worldpay|izettle|ubereats|just\s*eat|deliveroo|uber|bolt"
-        r"|fresha|treatwell|taskrabbit|terminal|pos\s+deposit|revolut"
-        r"|capital\s+one|evo\s*payments?|tink|teya(\s+solutions)?|talech"
-        r"|barclaycard|elavon|adyen|payzone|verifone|ingenico"
-        r"|nmi|trust\s+payments?|global\s+payments?|checkout\.com|epdq|santander|handepay"
-        r"|dojo|valitor|paypoint|mypos|moneris|paymentsense"
-        r"|merchant\s+services|payment\s+sense"
-        r"|bcard\d*\s*bcard|bcard\d+|bcard\s+\d+"
-        r")\b", 
-        combined_text
-    ):
-        return "Income"
-    if is_credit and re.search(r"(you\s?lend|yl\s?ii|yl\s?ltd|yl\s?limited|yl\s?a\s?limited)", combined_text):
-        # Check if it contains funding indicators (including within reference numbers)
-        if re.search(r"(fnd|fund|funding)", combined_text):
-            return "Loans"
-        else:
-            return "Income"
-    if is_credit and re.search(
-        r"\biwoca\b|\bcapify\b|\bfundbox\b|\bgot[\s\-]?capital\b|\bfunding[\s\-]?circle\b|"
-        r"\bfleximize\b|\bmarketfinance\b|\bliberis\b|\besme[\s\-]?loans\b|\bthincats\b|"
-        r"\bwhite[\s\-]?oak\b|\bgrowth[\s\-]?street\b|\bnucleus[\s\-]?commercial[\s\-]?finance\b|"
-        r"\bultimate[\s\-]?finance\b|\bjust[\s\-]?cash[\s\-]?flow\b|\bboost[\s\-]?capital\b|"
-        r"\bmerchant[\s\-]?money\b|\bcapital[\s\-]?on[\s\-]?tap\b|\bkriya\b|\buncapped\b|"
-        r"\blendingcrowd\b|\bfolk2folk\b|\bfunding[\s\-]?tree\b|\bstart[\s\-]?up[\s\-]?loans\b|"
-        r"\bbcrs[\s\-]?business[\s\-]?loans\b|\bbusiness[\s\-]?enterprise[\s\-]?fund\b|"
-        r"\bswig[\s\-]?finance\b|\benterprise[\s\-]?answers\b|\blet's[\s\-]?do[\s\-]?business[\s\-]?finance\b|"
-        r"\bfinance[\s\-]?for[\s\-]?enterprise\b|\bdsl[\s\-]?business[\s\-]?finance\b|"
-        r"\bbizcap[\s\-]?uk\b|\bsigma[\s\-]?lending\b|\bbizlend[\s\-]?ltd\b|\bcubefunder\b|\bloans?\b",
-        combined_text
-    ):
-        return "Loans"
-
-    if is_debit and re.search(
-        r"\biwoca\b|\bcapify\b|\bfundbox\b|\bgot[\s\-]?capital\b|\bfunding[\s\-]?circle\b|\bfleximize\b|\bmarketfinance\b|\bliberis\b|"
-        r"\besme[\s\-]?loans\b|\bthincats\b|\bwhite[\s\-]?oak\b|\bgrowth[\s\-]?street\b|\bnucleus[\s\-]?commercial[\s\-]?finance\b|"
-        r"\bultimate[\s\-]?finance\b|\bjust[\s\-]?cash[\s\-]?flow\b|\bboost[\s\-]?capital\b|\bmerchant[\s\-]?money\b|"
-        r"\bcapital[\s\-]?on[\s\-]?tap\b|\bkriya\b|\buncapped\b|\blendingcrowd\b|\bfolk2folk\b|\bfunding[\s\-]?tree\b|"
-        r"\bstart[\s\-]?up[\s\-]?loans\b|\bbcrs[\s\-]?business[\s\-]?loans\b|\bbusiness[\s\-]?enterprise[\s\-]?fund\b|"
-        r"\bswig[\s\-]?finance\b|\benterprise[\s\-]?answers\b|\blet's[\s\-]?do[\s\-]?business[\s\-]?finance\b|"
-        r"\bfinance[\s\-]?for[\s\-]?enterprise\b|\bdsl[\s\-]?business[\s\-]?finance\b|\bbizcap[\s\-]?uk\b|"
-        r"\bsigma[\s\-]?lending\b|\bbizlend[\s\-]?ltd\b|"
-        r"\bloan[\s\-]?repayment\b|\bdebt[\s\-]?repayment\b|\binstal?ments?\b|\bpay[\s\-]+back\b|\brepay(?:ing|ment|ed)?\b",
-        combined_text
-    ):
-        return "Debt Repayments"
-        
-    # Step 1.5: Business expense override (before Plaid fallback)
-    if is_debit and re.search(r"(facebook|facebk|fb\.me|outlook|office365|microsoft|google\s+ads|linkedin|twitter|adobe|zoom|slack|shopify|wix|squarespace|mailchimp|hubspot|hmrc\s*vat|hmrc|hm\s*revenue|hm\s*customs)", combined_text, re.IGNORECASE):
-        return "Expenses"
-
-    # Step 2: Plaid category fallback with validation
-    plaid_map = {
-        "income_wages": "Income",
-        "income_other_income": "Income",
-        "income_dividends": "Special Inflow",
-        "income_interest_earned": "Special Inflow",
-        "income_retirement_pension": "Special Inflow",
-        "income_unemployment": "Special Inflow",
-        "transfer_in_cash_advances_and_loans": "Loans",
-        "transfer_in_investment_and_retirement_funds": "Special Inflow",
-        "transfer_in_savings": "Special Inflow",
-        "transfer_in_account_transfer": "Special Inflow",
-        "transfer_in_other_transfer_in": "Special Inflow",
-        "transfer_in_deposit": "Special Inflow",
-        "transfer_out_investment_and_retirement_funds": "Special Outflow",
-        "transfer_out_savings": "Special Outflow",
-        "transfer_out_other_transfer_out": "Special Outflow",
-        "transfer_out_withdrawal": "Special Outflow",
-        "transfer_out_account_transfer": "Special Outflow",
-        "bank_fees_insufficient_funds": "Failed Payment",
-        "bank_fees_late_payment": "Failed Payment",
-    }
-
-    # Handle loan payment categories with validation
-    if category.startswith("loan_payments_"):
-        # Only trust Plaid if transaction contains actual loan/debt keywords
-        if re.search(r"(loan|debt|repay|finance|lending|credit|iwoca|capify|fundbox)", combined_text, re.IGNORECASE):
-            return "Debt Repayments"
-        # Otherwise, don't trust Plaid and continue to other checks
-
-    # Match exact key
-    if category in plaid_map:
-        return plaid_map[category]
-
-    # Step 3: Fallback for Plaid broad categories
-    broad_matchers = [
-        ("Expenses", [
-            "bank_fees_", "entertainment_", "food_and_drink_", "general_merchandise_",
-            "general_services_", "government_and_non_profit_", "home_improvement_",
-            "medical_", "personal_care_", "rent_and_utilities_", "transportation_", "travel_"
-        ])
-    ]
-
-    for label, patterns in broad_matchers:
-        if any(category.startswith(p) for p in patterns):
-            return label
-
-   # Default fallback: debit transactions become Expenses, credit transactions stay Uncategorised
-    if is_debit:
-        return "Expenses"
-    else:
-        return "Uncategorised"
+    """Categorize a transaction using the local copy of MCAV2's engine."""
+    category, _confidence = _TRANSACTION_CATEGORIZER.categorize_transaction(transaction)
+    return category
 
 def categorize_transaction(transaction_dict):
     """
-    Wrapper function to categorize a single transaction using your MCA logic
+    Wrapper function to categorize a single transaction using the MCAV2-derived logic.
     """
     category = map_transaction_category(transaction_dict)
     return category
@@ -815,14 +690,21 @@ def process_multiple_json_files(uploaded_files, business_name_mappings, start_da
                     normalized_txn = dict(txn)
                     normalized_txn['amount'] = float(amount)
                     
-                    # Apply your MCA categorization logic
+                    # Apply the local copy of MCAV2's MCA categorization logic
                     mca_subcategory = categorize_transaction(normalized_txn)
                     
                     # Determine flags based on subcategory
-                    is_revenue = mca_subcategory in ['Income', 'Special Inflow']
-                    is_expense = mca_subcategory in ['Expenses', 'Special Outflow']
+                    is_revenue = mca_subcategory == 'Income'
+                    is_special_inflow = mca_subcategory == 'Special Inflow'
+                    is_expense = mca_subcategory in ['Expenses', 'Special Outflow', 'Bank Charge']
                     is_debt_repayment = mca_subcategory in ['Debt Repayments']
                     is_debt = mca_subcategory in ['Loans']
+                    is_failed_payment = mca_subcategory == 'Failed Payment'
+                    is_transfer_in = mca_subcategory == 'Transfer In'
+                    is_transfer_out = mca_subcategory == 'Transfer Out'
+                    is_internal_transfer = is_transfer_in or is_transfer_out
+                    is_funding_injection = mca_subcategory == 'Funding Inflow'
+                    is_bank_charge = mca_subcategory == 'Bank Charge'
                     
                     all_business_data.append({
                         'business_name': business_name,
@@ -841,9 +723,16 @@ def process_multiple_json_files(uploaded_files, business_name_mappings, start_da
                         'account_number': route_info.get('account_number', 'N/A'),
                         'account_name': route_info.get('account_name', 'Unnamed Account'),
                         'is_revenue': is_revenue,
+                        'is_special_inflow': is_special_inflow,
                         'is_expense': is_expense,
                         'is_debt_repayment': is_debt_repayment,
                         'is_debt': is_debt,
+                        'is_failed_payment': is_failed_payment,
+                        'is_transfer_in': is_transfer_in,
+                        'is_transfer_out': is_transfer_out,
+                        'is_internal_transfer': is_internal_transfer,
+                        'is_funding_injection': is_funding_injection,
+                        'is_bank_charge': is_bank_charge,
                         'selected': True
                     })
                 except Exception as txn_error:
@@ -1142,7 +1031,12 @@ def processing_analysis_tab():
             with col1:
                 st.markdown("**💰 Revenue Categories:**")
                 st.markdown("• Income")
+
+                st.markdown("**↔️ Transfer/Funding Categories:**")
                 st.markdown("• Special Inflow")
+                st.markdown("• Transfer In")
+                st.markdown("• Transfer Out")
+                st.markdown("• Funding Inflow")
 
                 st.markdown("**💳 Debt/Financing Categories:**") 
                 st.markdown("• Loans")
@@ -1152,6 +1046,7 @@ def processing_analysis_tab():
                 st.markdown("**💸 Expense Categories:**")
                 st.markdown("• Expenses")
                 st.markdown("• Special Outflow")
+                st.markdown("• Bank Charge")
                 
                 st.markdown("**❌ Other Categories:**")
                 st.markdown("• Failed Payment")
