@@ -2,54 +2,133 @@ import pandas as pd
 import streamlit as st
 import json
 import re
-import sqlite3
 from datetime import datetime, date, timedelta
 import os
+from sqlalchemy import Column, Float, ForeignKey, Integer, MetaData, String, Table, create_engine, text
+from sqlalchemy.pool import NullPool
 from transaction_categorizer import TransactionCategorizer
 
 # Database setup
 DATABASE_FILE = "mca_business_data.db"
+BUSINESS_SEED_FILE = "businesses_seed.json"
+_DB_METADATA = MetaData()
+
+BUSINESSES_TABLE = Table(
+    "businesses",
+    _DB_METADATA,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("name", String, unique=True, nullable=False),
+    Column("processing_percentage", Float, nullable=False, default=0.0),
+    Column("created_date", String, nullable=False),
+    Column("updated_date", String, nullable=False),
+)
+
+PROCESSING_HISTORY_TABLE = Table(
+    "processing_history",
+    _DB_METADATA,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("business_id", Integer, ForeignKey("businesses.id"), nullable=False),
+    Column("date", String, nullable=False),
+    Column("income_amount", Float, nullable=False),
+    Column("processing_amount", Float, nullable=False),
+    Column("period_start", String, nullable=False),
+    Column("period_end", String, nullable=False),
+)
+
+APP_SETTINGS_TABLE = Table(
+    "app_settings",
+    _DB_METADATA,
+    Column("key", String, primary_key=True),
+    Column("value", String, nullable=False),
+)
+
+
+def get_secret_value(*keys):
+    """Safely read a Streamlit secret without breaking local/test runs."""
+    for key in keys:
+        try:
+            value = st.secrets.get(key, None)
+            if value:
+                return value
+        except Exception:
+            pass
+    return None
+
+
+def get_database_url():
+    """Return a cloud database URL when configured, otherwise local SQLite."""
+    database_url = get_secret_value("DATABASE_URL", "database_url") or os.environ.get("DATABASE_URL")
+    if database_url:
+        return str(database_url)
+    return f"sqlite:///{DATABASE_FILE}"
+
+
+def get_database_engine():
+    """Create a database engine for the current runtime."""
+    database_url = get_database_url()
+    if database_url.startswith("sqlite"):
+        return create_engine(database_url, connect_args={"check_same_thread": False}, poolclass=NullPool)
+    return create_engine(database_url)
+
+
+def _normalise_seed_businesses(raw_businesses):
+    """Validate business seed rows from secrets or a JSON seed file."""
+    if not raw_businesses:
+        return []
+
+    if isinstance(raw_businesses, str):
+        raw_businesses = json.loads(raw_businesses)
+
+    if isinstance(raw_businesses, dict):
+        raw_businesses = raw_businesses.get("businesses", [])
+
+    seed_businesses = []
+    for row in raw_businesses:
+        if not isinstance(row, dict):
+            continue
+
+        name = str(row.get("name", "")).strip()
+        rate = row.get("processing_percentage", row.get("processing_rate", row.get("rate")))
+        if not name or rate is None:
+            continue
+
+        seed_businesses.append({
+            "name": name,
+            "processing_percentage": float(rate),
+        })
+
+    return seed_businesses
+
+
+def load_seed_businesses():
+    """Load optional business seed data from Streamlit secrets or a local JSON file."""
+    secrets_businesses = get_secret_value("businesses")
+    seed_businesses = _normalise_seed_businesses(secrets_businesses)
+    if seed_businesses:
+        return seed_businesses
+
+    seed_json = get_secret_value("businesses_json")
+    seed_businesses = _normalise_seed_businesses(seed_json)
+    if seed_businesses:
+        return seed_businesses
+
+    if os.path.exists(BUSINESS_SEED_FILE):
+        with open(BUSINESS_SEED_FILE, "r", encoding="utf-8") as seed_file:
+            return _normalise_seed_businesses(json.load(seed_file))
+
+    return []
+
+
+def seed_businesses_from_config():
+    """Upsert configured seed businesses into the SQLite database."""
+    for business in load_seed_businesses():
+        add_or_update_business(business["name"], business["processing_percentage"])
 
 def init_database():
     """Initialize SQLite database with required tables"""
-    conn = sqlite3.connect(DATABASE_FILE)
-    cursor = conn.cursor()
-    
-    # Create businesses table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS businesses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL,
-            processing_percentage REAL NOT NULL DEFAULT 0.0,
-            created_date TEXT NOT NULL,
-            updated_date TEXT NOT NULL
-        )
-    ''')
-    
-    # Create processing history table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS processing_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            business_id INTEGER NOT NULL,
-            date TEXT NOT NULL,
-            income_amount REAL NOT NULL,
-            processing_amount REAL NOT NULL,
-            period_start TEXT NOT NULL,
-            period_end TEXT NOT NULL,
-            FOREIGN KEY (business_id) REFERENCES businesses (id)
-        )
-    ''')
-    
-    # Create app settings table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS app_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
+    engine = get_database_engine()
+    _DB_METADATA.create_all(engine)
+    seed_businesses_from_config()
 
 def clean_account_name(account_name):
     """Clean account name to extract business name"""
@@ -130,42 +209,47 @@ def extract_business_name_from_filename(filename: str) -> str:
 
 def get_all_businesses() -> pd.DataFrame:
     """Get all businesses from database"""
-    conn = sqlite3.connect(DATABASE_FILE)
-    df = pd.read_sql_query('''
+    engine = get_database_engine()
+    with engine.connect() as conn:
+        df = pd.read_sql_query(text('''
         SELECT id, name, processing_percentage, created_date, updated_date 
         FROM businesses 
         ORDER BY name
-    ''', conn)
-    conn.close()
+    '''), conn)
     return df
 
 def add_or_update_business(name: str, processing_percentage: float) -> int:
     """Add new business or update existing one"""
-    conn = sqlite3.connect(DATABASE_FILE)
-    cursor = conn.cursor()
-    
     current_time = datetime.now().isoformat()
-    
-    # Try to update existing business
-    cursor.execute('''
-        UPDATE businesses 
-        SET processing_percentage = ?, updated_date = ?
-        WHERE name = ?
-    ''', (processing_percentage, current_time, name))
-    
-    if cursor.rowcount == 0:
-        # Insert new business
-        cursor.execute('''
-            INSERT INTO businesses (name, processing_percentage, created_date, updated_date)
-            VALUES (?, ?, ?, ?)
-        ''', (name, processing_percentage, current_time, current_time))
-    
-    # Get the business ID
-    cursor.execute('SELECT id FROM businesses WHERE name = ?', (name,))
-    business_id = cursor.fetchone()[0]
-    
-    conn.commit()
-    conn.close()
+
+    engine = get_database_engine()
+    with engine.begin() as conn:
+        result = conn.execute(text('''
+            UPDATE businesses 
+            SET processing_percentage = :processing_percentage, updated_date = :updated_date
+            WHERE name = :name
+        '''), {
+            "processing_percentage": processing_percentage,
+            "updated_date": current_time,
+            "name": name,
+        })
+
+        if result.rowcount == 0:
+            conn.execute(text('''
+                INSERT INTO businesses (name, processing_percentage, created_date, updated_date)
+                VALUES (:name, :processing_percentage, :created_date, :updated_date)
+            '''), {
+                "name": name,
+                "processing_percentage": processing_percentage,
+                "created_date": current_time,
+                "updated_date": current_time,
+            })
+
+        business_id = conn.execute(
+            text('SELECT id FROM businesses WHERE name = :name'),
+            {"name": name},
+        ).fetchone()[0]
+
     return business_id
 
 def update_business_by_id(business_id: int, name: str, processing_percentage: float) -> int:
@@ -175,51 +259,85 @@ def update_business_by_id(business_id: int, name: str, processing_percentage: fl
         raise ValueError("Business name cannot be blank.")
 
     current_time = datetime.now().isoformat()
-    conn = sqlite3.connect(DATABASE_FILE)
-    try:
-        cursor = conn.cursor()
-        cursor.execute('''
+    engine = get_database_engine()
+    with engine.begin() as conn:
+        duplicate = conn.execute(text('''
             SELECT id FROM businesses
-            WHERE name = ? AND id != ?
-        ''', (name, business_id))
-        if cursor.fetchone():
+            WHERE name = :name AND id != :business_id
+        '''), {"name": name, "business_id": business_id}).fetchone()
+        if duplicate:
             raise ValueError(f"Business name '{name}' already exists.")
 
-        cursor.execute('''
+        result = conn.execute(text('''
             UPDATE businesses
-            SET name = ?, processing_percentage = ?, updated_date = ?
-            WHERE id = ?
-        ''', (name, processing_percentage, current_time, business_id))
-        if cursor.rowcount == 0:
+            SET name = :name, processing_percentage = :processing_percentage, updated_date = :updated_date
+            WHERE id = :business_id
+        '''), {
+            "name": name,
+            "processing_percentage": processing_percentage,
+            "updated_date": current_time,
+            "business_id": business_id,
+        })
+        if result.rowcount == 0:
             raise ValueError("Business no longer exists.")
-
-        conn.commit()
-    finally:
-        conn.close()
 
     return business_id
 
 def save_processing_history(business_id: int, date: str, income_amount: float, 
                           processing_amount: float, period_start: str, period_end: str):
     """Save processing history to database"""
-    conn = sqlite3.connect(DATABASE_FILE)
-    cursor = conn.cursor()
-    
-    # Delete existing record for same business and date to avoid duplicates
-    cursor.execute('''
-        DELETE FROM processing_history 
-        WHERE business_id = ? AND date = ? AND period_start = ? AND period_end = ?
-    ''', (business_id, date, period_start, period_end))
-    
-    # Insert new record
-    cursor.execute('''
-        INSERT INTO processing_history 
-        (business_id, date, income_amount, processing_amount, period_start, period_end)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (business_id, date, income_amount, processing_amount, period_start, period_end))
-    
-    conn.commit()
-    conn.close()
+    engine = get_database_engine()
+    with engine.begin() as conn:
+        conn.execute(text('''
+            DELETE FROM processing_history 
+            WHERE business_id = :business_id AND date = :date
+              AND period_start = :period_start AND period_end = :period_end
+        '''), {
+            "business_id": business_id,
+            "date": date,
+            "period_start": period_start,
+            "period_end": period_end,
+        })
+
+        conn.execute(text('''
+            INSERT INTO processing_history 
+            (business_id, date, income_amount, processing_amount, period_start, period_end)
+            VALUES (:business_id, :date, :income_amount, :processing_amount, :period_start, :period_end)
+        '''), {
+            "business_id": business_id,
+            "date": date,
+            "income_amount": income_amount,
+            "processing_amount": processing_amount,
+            "period_start": period_start,
+            "period_end": period_end,
+        })
+
+
+def get_processing_history() -> pd.DataFrame:
+    """Get processing history with business names."""
+    engine = get_database_engine()
+    with engine.connect() as conn:
+        return pd.read_sql_query(text('''
+            SELECT 
+                h.date,
+                b.name as business_name,
+                h.income_amount,
+                h.processing_amount,
+                h.period_start,
+                h.period_end,
+                (h.processing_amount / h.income_amount * 100) as processing_percentage
+            FROM processing_history h
+            JOIN businesses b ON h.business_id = b.id
+            ORDER BY h.date DESC, b.name
+        '''), conn)
+
+
+def get_processing_history_count() -> int:
+    """Get the number of saved processing records."""
+    engine = get_database_engine()
+    with engine.connect() as conn:
+        row = conn.execute(text('SELECT COUNT(*) as count FROM processing_history')).fetchone()
+    return int(row[0] if row else 0)
 
 # MCA Sub-categorization using your business lending scorecard logic
 MCA_CATEGORIES = [
@@ -818,6 +936,41 @@ def business_management_tab():
                 else:
                     st.error("Please enter a business name")
 
+        st.subheader("Backup / Restore")
+        backup_rows = []
+        if not businesses_df.empty:
+            backup_rows = businesses_df[["name", "processing_percentage"]].to_dict(orient="records")
+
+        st.download_button(
+            label="Download Businesses Backup",
+            data=json.dumps({"businesses": backup_rows}, indent=2),
+            file_name=f"businesses_backup_{datetime.now().strftime('%Y%m%d')}.json",
+            mime="application/json",
+            disabled=not backup_rows,
+            help="Use this as a quick restore file if Streamlit Cloud ever resets its local database."
+        )
+
+        restore_file = st.file_uploader(
+            "Restore Businesses Backup",
+            type=["json"],
+            key="businesses_restore_upload",
+            help="Upload a businesses backup JSON exported from this app."
+        )
+
+        if restore_file is not None and st.button("Restore Businesses"):
+            try:
+                restored_businesses = _normalise_seed_businesses(json.load(restore_file))
+                if not restored_businesses:
+                    raise ValueError("No valid businesses found in the uploaded backup.")
+
+                for business in restored_businesses:
+                    add_or_update_business(business["name"], business["processing_percentage"])
+
+                st.success(f"Restored {len(restored_businesses)} businesses.")
+                st.rerun()
+            except Exception as error:
+                st.error(f"Could not restore businesses backup: {error}")
+
 def extract_business_name_from_json(json_data, filename=""):
     """Extract business name from JSON account data with multi-account handling"""
     accounts = json_data.get('accounts', [])
@@ -1216,24 +1369,7 @@ def processing_history_tab():
         "Review saved calculations and export historical processing records."
     )
     
-    conn = sqlite3.connect(DATABASE_FILE)
-    
-    # Get processing history with business names
-    history_df = pd.read_sql_query('''
-        SELECT 
-            h.date,
-            b.name as business_name,
-            h.income_amount,
-            h.processing_amount,
-            h.period_start,
-            h.period_end,
-            (h.processing_amount / h.income_amount * 100) as processing_percentage
-        FROM processing_history h
-        JOIN businesses b ON h.business_id = b.id
-        ORDER BY h.date DESC, b.name
-    ''', conn)
-    
-    conn.close()
+    history_df = get_processing_history()
     
     if not history_df.empty:
         # Format for display
@@ -1308,9 +1444,7 @@ def main():
 
     try:
         businesses_df = get_all_businesses()
-        conn = sqlite3.connect(DATABASE_FILE)
-        history_count = pd.read_sql_query('SELECT COUNT(*) as count FROM processing_history', conn).iloc[0]['count']
-        conn.close()
+        history_count = get_processing_history_count()
 
         stat1, stat2, stat3 = st.columns(3)
         with stat1:
@@ -1349,9 +1483,7 @@ def main():
             businesses_df = get_all_businesses()
             st.metric("Configured Businesses", len(businesses_df))
             
-            conn = sqlite3.connect(DATABASE_FILE)
-            history_count = pd.read_sql_query('SELECT COUNT(*) as count FROM processing_history', conn).iloc[0]['count']
-            conn.close()
+            history_count = get_processing_history_count()
             st.metric("Processing Records", history_count)
         except:
             st.metric("Configured Businesses", 0)

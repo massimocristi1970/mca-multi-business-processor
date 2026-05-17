@@ -46,6 +46,7 @@ mca_business_data.db.backup
 
 # Data files (optional - remove if you want to commit sample data)
 data/*.json
+businesses_seed.json
 
 # Logs
 *.log

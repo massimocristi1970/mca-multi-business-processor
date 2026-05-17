@@ -13,6 +13,7 @@ A Streamlit application for processing multiple business transaction files and c
 - Configure processing percentages per business
 - Persistent SQLite database storage
 - Easy add/edit/update business settings
+- Business backup/restore for Streamlit Cloud
 
 ### 📊 Income Analysis & Calculations
 - Automatic categorization using MCA business lending logic
@@ -51,6 +52,33 @@ streamlit run app.py
 - Go to **"Business Management"** tab
 - Add your businesses with their processing percentages
 - Example: "ABC Ltd" with 15.5% processing rate
+
+### Streamlit Cloud Business Setup
+
+Local business settings are stored in `mca_business_data.db`, which is intentionally not committed to Git. Streamlit Cloud runs in its own environment and does not guarantee that files created by the app, including SQLite database files, will persist across reboots or redeploys.
+
+For the free/no-extra-account workflow, use the app normally in Streamlit Cloud and keep a backup:
+
+1. Open **Business Management** in the Cloud app.
+2. Add/edit businesses as usual.
+3. Click **Download Businesses Backup** after changes.
+4. If Streamlit Cloud ever resets the local database, upload that JSON under **Restore Businesses Backup**.
+
+Optional: you can seed initial businesses through Streamlit secrets if you want the Cloud app to recreate a base list on startup:
+
+```toml
+[[businesses]]
+name = "ABC Ltd"
+processing_percentage = 15.5
+```
+
+Optional for stronger persistence: if you later choose to use a hosted Postgres database, set `DATABASE_URL` in Streamlit secrets:
+
+```toml
+DATABASE_URL = "postgresql+psycopg2://USER:PASSWORD@HOST:PORT/DATABASE"
+```
+
+For local-only seeding, copy `businesses_seed.example.json` to `businesses_seed.json` and add your real businesses there. `businesses_seed.json` is ignored by Git so private business names/rates are not accidentally committed.
 
 ### 2. **Process Transactions**
 - Go to **"Processing & Analysis"** tab
