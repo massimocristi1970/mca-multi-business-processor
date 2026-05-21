@@ -35,6 +35,36 @@ PROCESSING_HISTORY_TABLE = Table(
     Column("period_end", String, nullable=False),
 )
 
+ADVANCES_TABLE = Table(
+    "advances",
+    _DB_METADATA,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("business_id", Integer, ForeignKey("businesses.id"), nullable=False),
+    Column("amount_loaned", Float, nullable=False),
+    Column("factor_rate", Float, nullable=False),
+    Column("split_percentage", Float, nullable=False),
+    Column("total_repayable", Float, nullable=False),
+    Column("funded_date", String, nullable=False),
+    Column("status", String, nullable=False, default="active"),
+    Column("notes", String, nullable=False, default=""),
+    Column("created_date", String, nullable=False),
+    Column("updated_date", String, nullable=False),
+)
+
+ADVANCE_PAYMENTS_TABLE = Table(
+    "advance_payments",
+    _DB_METADATA,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("advance_id", Integer, ForeignKey("advances.id"), nullable=False),
+    Column("business_id", Integer, ForeignKey("businesses.id"), nullable=False),
+    Column("processing_history_id", Integer, ForeignKey("processing_history.id"), nullable=True),
+    Column("payment_date", String, nullable=False),
+    Column("payment_amount", Float, nullable=False),
+    Column("source", String, nullable=False),
+    Column("notes", String, nullable=False, default=""),
+    Column("created_date", String, nullable=False),
+)
+
 APP_SETTINGS_TABLE = Table(
     "app_settings",
     _DB_METADATA,
@@ -289,6 +319,20 @@ def save_processing_history(business_id: int, date: str, income_amount: float,
     engine = get_database_engine()
     with engine.begin() as conn:
         conn.execute(text('''
+            DELETE FROM advance_payments
+            WHERE processing_history_id IN (
+                SELECT id FROM processing_history
+                WHERE business_id = :business_id AND date = :date
+                  AND period_start = :period_start AND period_end = :period_end
+            )
+        '''), {
+            "business_id": business_id,
+            "date": date,
+            "period_start": period_start,
+            "period_end": period_end,
+        })
+
+        conn.execute(text('''
             DELETE FROM processing_history 
             WHERE business_id = :business_id AND date = :date
               AND period_start = :period_start AND period_end = :period_end
@@ -311,6 +355,20 @@ def save_processing_history(business_id: int, date: str, income_amount: float,
             "period_start": period_start,
             "period_end": period_end,
         })
+
+        history_id = conn.execute(text('''
+            SELECT id FROM processing_history
+            WHERE business_id = :business_id AND date = :date
+              AND period_start = :period_start AND period_end = :period_end
+            ORDER BY id DESC
+        '''), {
+            "business_id": business_id,
+            "date": date,
+            "period_start": period_start,
+            "period_end": period_end,
+        }).fetchone()[0]
+
+    return int(history_id)
 
 
 def get_processing_history() -> pd.DataFrame:
@@ -338,6 +396,243 @@ def get_processing_history_count() -> int:
     with engine.connect() as conn:
         row = conn.execute(text('SELECT COUNT(*) as count FROM processing_history')).fetchone()
     return int(row[0] if row else 0)
+
+
+def get_active_advance_for_business(business_id: int):
+    """Return the active advance row for a business, if one exists."""
+    engine = get_database_engine()
+    with engine.connect() as conn:
+        return conn.execute(text('''
+            SELECT id, business_id, amount_loaned, factor_rate, split_percentage,
+                   total_repayable, funded_date, status, notes
+            FROM advances
+            WHERE business_id = :business_id AND status = 'active'
+            ORDER BY funded_date DESC, id DESC
+        '''), {"business_id": business_id}).fetchone()
+
+
+def create_advance(
+    business_id: int,
+    amount_loaned: float,
+    factor_rate: float,
+    split_percentage: float,
+    funded_date: str,
+    notes: str = "",
+) -> int:
+    """Create a new active MCA advance for a configured business."""
+    if amount_loaned <= 0:
+        raise ValueError("Amount loaned must be greater than zero.")
+    if factor_rate <= 0:
+        raise ValueError("Factor rate must be greater than zero.")
+    if split_percentage < 0 or split_percentage > 100:
+        raise ValueError("Split percentage must be between 0 and 100.")
+
+    current_time = datetime.now().isoformat()
+    total_repayable = round(float(amount_loaned) * float(factor_rate), 2)
+    engine = get_database_engine()
+    with engine.begin() as conn:
+        conn.execute(text('''
+            INSERT INTO advances (
+                business_id, amount_loaned, factor_rate, split_percentage,
+                total_repayable, funded_date, status, notes, created_date, updated_date
+            )
+            VALUES (
+                :business_id, :amount_loaned, :factor_rate, :split_percentage,
+                :total_repayable, :funded_date, 'active', :notes, :created_date, :updated_date
+            )
+        '''), {
+            "business_id": business_id,
+            "amount_loaned": float(amount_loaned),
+            "factor_rate": float(factor_rate),
+            "split_percentage": float(split_percentage),
+            "total_repayable": total_repayable,
+            "funded_date": funded_date,
+            "notes": notes.strip(),
+            "created_date": current_time,
+            "updated_date": current_time,
+        })
+        advance_id = conn.execute(text('''
+            SELECT id FROM advances
+            WHERE business_id = :business_id AND created_date = :created_date
+            ORDER BY id DESC
+        '''), {
+            "business_id": business_id,
+            "created_date": current_time,
+        }).fetchone()[0]
+
+        conn.execute(text('''
+            UPDATE businesses
+            SET processing_percentage = :split_percentage, updated_date = :updated_date
+            WHERE id = :business_id
+        '''), {
+            "split_percentage": float(split_percentage),
+            "updated_date": current_time,
+            "business_id": business_id,
+        })
+
+    return int(advance_id)
+
+
+def get_advance_balances() -> pd.DataFrame:
+    """Return advances with paid and remaining balance figures."""
+    engine = get_database_engine()
+    with engine.connect() as conn:
+        return pd.read_sql_query(text('''
+            SELECT
+                a.id,
+                a.business_id,
+                b.name as business_name,
+                a.amount_loaned,
+                a.factor_rate,
+                a.split_percentage,
+                a.total_repayable,
+                COALESCE(SUM(p.payment_amount), 0) as total_paid,
+                CASE
+                    WHEN a.total_repayable - COALESCE(SUM(p.payment_amount), 0) < 0 THEN 0
+                    ELSE a.total_repayable - COALESCE(SUM(p.payment_amount), 0)
+                END as balance_remaining,
+                a.funded_date,
+                a.status,
+                a.notes
+            FROM advances a
+            JOIN businesses b ON a.business_id = b.id
+            LEFT JOIN advance_payments p ON a.id = p.advance_id
+            GROUP BY
+                a.id, a.business_id, b.name, a.amount_loaned, a.factor_rate,
+                a.split_percentage, a.total_repayable, a.funded_date, a.status, a.notes
+            ORDER BY
+                CASE WHEN a.status = 'active' THEN 0 ELSE 1 END,
+                a.funded_date DESC,
+                b.name
+        '''), conn)
+
+
+def get_payment_ledger() -> pd.DataFrame:
+    """Return payment ledger entries with business and advance details."""
+    engine = get_database_engine()
+    with engine.connect() as conn:
+        return pd.read_sql_query(text('''
+            SELECT
+                p.id,
+                p.payment_date,
+                b.name as business_name,
+                p.payment_amount,
+                p.source,
+                p.notes,
+                a.id as advance_id,
+                a.total_repayable,
+                a.status as advance_status,
+                h.period_start,
+                h.period_end
+            FROM advance_payments p
+            JOIN advances a ON p.advance_id = a.id
+            JOIN businesses b ON p.business_id = b.id
+            LEFT JOIN processing_history h ON p.processing_history_id = h.id
+            ORDER BY p.payment_date DESC, p.id DESC
+        '''), conn)
+
+
+def refresh_advance_status(advance_id: int) -> None:
+    """Mark an advance paid when payments meet or exceed total repayable."""
+    current_time = datetime.now().isoformat()
+    engine = get_database_engine()
+    with engine.begin() as conn:
+        row = conn.execute(text('''
+            SELECT
+                a.total_repayable,
+                COALESCE(SUM(p.payment_amount), 0) as total_paid
+            FROM advances a
+            LEFT JOIN advance_payments p ON a.id = p.advance_id
+            WHERE a.id = :advance_id
+            GROUP BY a.id, a.total_repayable
+        '''), {"advance_id": advance_id}).fetchone()
+
+        if not row:
+            return
+
+        new_status = "paid" if float(row[1]) >= float(row[0]) else "active"
+        conn.execute(text('''
+            UPDATE advances
+            SET status = :status, updated_date = :updated_date
+            WHERE id = :advance_id
+        '''), {
+            "status": new_status,
+            "updated_date": current_time,
+            "advance_id": advance_id,
+        })
+
+
+def record_advance_payment(
+    advance_id: int,
+    business_id: int,
+    payment_date: str,
+    payment_amount: float,
+    source: str,
+    notes: str = "",
+    processing_history_id: int | None = None,
+) -> int:
+    """Record a payment against an advance and refresh its balance status."""
+    if payment_amount <= 0:
+        raise ValueError("Payment amount must be greater than zero.")
+
+    current_time = datetime.now().isoformat()
+    engine = get_database_engine()
+    with engine.begin() as conn:
+        conn.execute(text('''
+            INSERT INTO advance_payments (
+                advance_id, business_id, processing_history_id, payment_date,
+                payment_amount, source, notes, created_date
+            )
+            VALUES (
+                :advance_id, :business_id, :processing_history_id, :payment_date,
+                :payment_amount, :source, :notes, :created_date
+            )
+        '''), {
+            "advance_id": advance_id,
+            "business_id": business_id,
+            "processing_history_id": processing_history_id,
+            "payment_date": payment_date,
+            "payment_amount": float(payment_amount),
+            "source": source,
+            "notes": notes.strip(),
+            "created_date": current_time,
+        })
+        payment_id = conn.execute(text('''
+            SELECT id FROM advance_payments
+            WHERE advance_id = :advance_id AND created_date = :created_date
+            ORDER BY id DESC
+        '''), {
+            "advance_id": advance_id,
+            "created_date": current_time,
+        }).fetchone()[0]
+
+    refresh_advance_status(advance_id)
+    return int(payment_id)
+
+
+def apply_processing_payment_to_active_advance(
+    business_id: int,
+    processing_history_id: int,
+    payment_date: str,
+    payment_amount: float,
+    period_start: str,
+    period_end: str,
+) -> bool:
+    """Apply a saved processing amount to the business's active advance."""
+    active_advance = get_active_advance_for_business(business_id)
+    if not active_advance or payment_amount <= 0:
+        return False
+
+    record_advance_payment(
+        advance_id=int(active_advance._mapping["id"]),
+        business_id=business_id,
+        processing_history_id=processing_history_id,
+        payment_date=payment_date,
+        payment_amount=payment_amount,
+        source="processing_run",
+        notes=f"Auto-applied from processing period {period_start} to {period_end}",
+    )
+    return True
 
 # MCA Sub-categorization using your business lending scorecard logic
 MCA_CATEGORIES = [
@@ -672,10 +967,11 @@ def render_processing_results(df: pd.DataFrame, start_date: date, end_date: date
         if st.button("💾 Save Processing Calculations", type="secondary", key="save_processing_calculations"):
             period_start = start_date.isoformat()
             period_end = end_date.isoformat()
+            applied_payment_count = 0
 
             for business_name, row in business_summary.iterrows():
                 business_id = add_or_update_business(business_name, row['Processing %'])
-                save_processing_history(
+                history_id = save_processing_history(
                     business_id=business_id,
                     date=date.today().isoformat(),
                     income_amount=row['Total Income'],
@@ -684,7 +980,23 @@ def render_processing_results(df: pd.DataFrame, start_date: date, end_date: date
                     period_end=period_end
                 )
 
-            st.success("Processing calculations saved to database!")
+                if apply_processing_payment_to_active_advance(
+                    business_id=business_id,
+                    processing_history_id=history_id,
+                    payment_date=date.today().isoformat(),
+                    payment_amount=row['Amount to Process'],
+                    period_start=period_start,
+                    period_end=period_end,
+                ):
+                    applied_payment_count += 1
+
+            if applied_payment_count:
+                st.success(
+                    f"Processing calculations saved. {applied_payment_count} payment(s) were applied to active advance balances."
+                )
+            else:
+                st.success("Processing calculations saved to database.")
+                st.info("No active advances were found, so no balances were reduced.")
 
         if st.checkbox("📊 Show Daily Breakdown", key="show_daily_breakdown"):
             render_section_intro(
@@ -1367,62 +1679,309 @@ def processing_analysis_tab():
         render_processing_results(stored_df, saved_start, saved_end)
 
 def processing_history_tab():
-    """View processing history"""
+    """View processing history and MCA advance repayment balances."""
     render_section_intro(
-        "Archive",
-        "Processing History",
-        "Review saved calculations and export historical processing records."
+        "Ledger",
+        "Advances, Payments & Processing History",
+        "Configure funded advances, apply processed payments, and review saved calculation history."
     )
+
+    advance_tab, ledger_tab, history_tab = st.tabs([
+        "Advance Setup",
+        "Balances & Payments",
+        "Processing History",
+    ])
+
+    with advance_tab:
+        businesses_df = get_all_businesses()
+
+        if businesses_df.empty:
+            st.info("Add configured businesses in Business Management before creating an advance.")
+        else:
+            st.subheader("Create MCA Advance")
+            st.caption("The split percentage is also saved as the company's processing percentage.")
+
+            business_options = dict(zip(businesses_df['name'], businesses_df['id']))
+            selected_business = st.selectbox(
+                "Configured Company",
+                list(business_options.keys()),
+                key="advance_business_select",
+            )
+
+            current_split = float(
+                businesses_df.loc[
+                    businesses_df['name'] == selected_business,
+                    'processing_percentage'
+                ].iloc[0]
+            )
+
+            with st.form("advance_setup_form"):
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    amount_loaned = st.number_input(
+                        "Amount Loaned",
+                        min_value=0.0,
+                        step=100.0,
+                        format="%.2f",
+                        key="advance_amount_loaned",
+                    )
+                with col2:
+                    factor_rate = st.number_input(
+                        "Factor Rate Charged",
+                        min_value=0.0,
+                        value=1.30,
+                        step=0.01,
+                        format="%.2f",
+                        key="advance_factor_rate",
+                    )
+                with col3:
+                    split_percentage = st.number_input(
+                        "% Split",
+                        min_value=0.0,
+                        max_value=100.0,
+                        value=current_split,
+                        step=0.1,
+                        format="%.1f",
+                        key="advance_split_percentage",
+                    )
+
+                funded_date = st.date_input(
+                    "Funded Date",
+                    value=date.today(),
+                    key="advance_funded_date",
+                )
+                notes = st.text_area(
+                    "Notes",
+                    placeholder="Optional reference, deal ID, or underwriting note",
+                    key="advance_notes",
+                )
+
+                total_repayable = amount_loaned * factor_rate
+                st.metric("Total Repayable", f"£{total_repayable:,.2f}")
+
+                submitted = st.form_submit_button("Create Advance", type="primary")
+                if submitted:
+                    try:
+                        create_advance(
+                            business_id=int(business_options[selected_business]),
+                            amount_loaned=amount_loaned,
+                            factor_rate=factor_rate,
+                            split_percentage=split_percentage,
+                            funded_date=funded_date.isoformat(),
+                            notes=notes,
+                        )
+                        st.success(f"Advance created for {selected_business}.")
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
+
+            balances_df = get_advance_balances()
+            if not balances_df.empty:
+                st.subheader("Existing Advances")
+                display_balances = balances_df.copy()
+                for column in ["amount_loaned", "total_repayable", "total_paid", "balance_remaining"]:
+                    display_balances[column] = display_balances[column].apply(lambda value: f"£{value:,.2f}")
+                display_balances["factor_rate"] = display_balances["factor_rate"].apply(lambda value: f"{value:.2f}x")
+                display_balances["split_percentage"] = display_balances["split_percentage"].apply(lambda value: f"{value:.1f}%")
+
+                st.dataframe(
+                    display_balances[[
+                        "business_name", "amount_loaned", "factor_rate", "split_percentage",
+                        "total_repayable", "total_paid", "balance_remaining", "funded_date", "status"
+                    ]],
+                    column_config={
+                        "business_name": "Business",
+                        "amount_loaned": "Amount Loaned",
+                        "factor_rate": "Factor Rate",
+                        "split_percentage": "Split",
+                        "total_repayable": "Total Repayable",
+                        "total_paid": "Paid",
+                        "balance_remaining": "Balance",
+                        "funded_date": "Funded Date",
+                        "status": "Status",
+                    },
+                    use_container_width=True,
+                )
+
+    with ledger_tab:
+        balances_df = get_advance_balances()
+        payment_df = get_payment_ledger()
+
+        if balances_df.empty:
+            st.info("No advances have been created yet.")
+        else:
+            active_balances = balances_df[balances_df["status"] == "active"].copy()
+            total_repayable = balances_df["total_repayable"].sum()
+            total_paid = balances_df["total_paid"].sum()
+            total_balance = balances_df["balance_remaining"].sum()
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Repayable", f"£{total_repayable:,.2f}")
+            with col2:
+                st.metric("Total Paid", f"£{total_paid:,.2f}")
+            with col3:
+                st.metric("Outstanding Balance", f"£{total_balance:,.2f}")
+
+            st.subheader("Running Balances")
+            display_balances = balances_df.copy()
+            for column in ["amount_loaned", "total_repayable", "total_paid", "balance_remaining"]:
+                display_balances[column] = display_balances[column].apply(lambda value: f"£{value:,.2f}")
+            display_balances["factor_rate"] = display_balances["factor_rate"].apply(lambda value: f"{value:.2f}x")
+            display_balances["split_percentage"] = display_balances["split_percentage"].apply(lambda value: f"{value:.1f}%")
+
+            st.dataframe(
+                display_balances[[
+                    "business_name", "status", "amount_loaned", "factor_rate", "split_percentage",
+                    "total_repayable", "total_paid", "balance_remaining", "funded_date"
+                ]],
+                column_config={
+                    "business_name": "Business",
+                    "status": "Status",
+                    "amount_loaned": "Amount Loaned",
+                    "factor_rate": "Factor Rate",
+                    "split_percentage": "Split",
+                    "total_repayable": "Total Repayable",
+                    "total_paid": "Paid",
+                    "balance_remaining": "Balance",
+                    "funded_date": "Funded Date",
+                },
+                use_container_width=True,
+            )
+
+            with st.expander("Log Manual Payment"):
+                if active_balances.empty:
+                    st.info("There are no active advances available for manual payment logging.")
+                else:
+                    active_options = {
+                        f"{row.business_name} - balance £{row.balance_remaining:,.2f}": row
+                        for row in active_balances.itertuples(index=False)
+                    }
+                    with st.form("manual_payment_form"):
+                        selected_advance_label = st.selectbox(
+                            "Active Advance",
+                            list(active_options.keys()),
+                            key="manual_payment_advance",
+                        )
+                        selected_advance = active_options[selected_advance_label]
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            payment_date = st.date_input(
+                                "Payment Date",
+                                value=date.today(),
+                                key="manual_payment_date",
+                            )
+                        with col2:
+                            payment_amount = st.number_input(
+                                "Payment Amount",
+                                min_value=0.0,
+                                step=10.0,
+                                format="%.2f",
+                                key="manual_payment_amount",
+                            )
+                        notes = st.text_input(
+                            "Notes",
+                            placeholder="Optional payment reference",
+                            key="manual_payment_notes",
+                        )
+                        submitted = st.form_submit_button("Log Payment", type="primary")
+                        if submitted:
+                            try:
+                                record_advance_payment(
+                                    advance_id=int(selected_advance.id),
+                                    business_id=int(selected_advance.business_id),
+                                    payment_date=payment_date.isoformat(),
+                                    payment_amount=payment_amount,
+                                    source="manual",
+                                    notes=notes,
+                                )
+                                st.success("Payment logged and balance updated.")
+                                st.rerun()
+                            except ValueError as exc:
+                                st.error(str(exc))
+
+        if not payment_df.empty:
+            st.subheader("Payment Ledger")
+            display_payments = payment_df.copy()
+            display_payments["payment_amount"] = display_payments["payment_amount"].apply(lambda value: f"£{value:,.2f}")
+            display_payments["total_repayable"] = display_payments["total_repayable"].apply(lambda value: f"£{value:,.2f}")
+            st.dataframe(
+                display_payments[[
+                    "payment_date", "business_name", "payment_amount", "source",
+                    "period_start", "period_end", "advance_status", "notes"
+                ]],
+                column_config={
+                    "payment_date": "Payment Date",
+                    "business_name": "Business",
+                    "payment_amount": "Payment Amount",
+                    "source": "Source",
+                    "period_start": "Period Start",
+                    "period_end": "Period End",
+                    "advance_status": "Advance Status",
+                    "notes": "Notes",
+                },
+                use_container_width=True,
+            )
+
+            st.download_button(
+                label="Download Payment Ledger CSV",
+                data=payment_df.to_csv(index=False),
+                file_name=f"payment_ledger_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+            )
+        else:
+            st.info("No payments have been logged yet.")
     
-    history_df = get_processing_history()
+    with history_tab:
+        history_df = get_processing_history()
     
-    if not history_df.empty:
-        # Format for display
-        display_df = history_df.copy()
-        display_df['income_amount'] = display_df['income_amount'].apply(lambda x: f"£{x:,.2f}")
-        display_df['processing_amount'] = display_df['processing_amount'].apply(lambda x: f"£{x:,.2f}")
-        display_df['processing_percentage'] = display_df['processing_percentage'].apply(lambda x: f"{x:.1f}%")
-        
-        st.dataframe(
-            display_df[['date', 'business_name', 'income_amount', 'processing_amount', 'processing_percentage', 'period_start', 'period_end']],
-            column_config={
-                'date': 'Processing Date',
-                'business_name': 'Business',
-                'income_amount': 'Income Amount',
-                'processing_amount': 'Processing Amount',
-                'processing_percentage': 'Processing %',
-                'period_start': 'Period Start',
-                'period_end': 'Period End'
-            },
-            use_container_width=True
-        )
-        
-        # Summary statistics
-        st.subheader("History Summary")
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            total_income = history_df['income_amount'].sum()
-            st.metric("Total Income Processed", f"£{total_income:,.2f}")
-        
-        with col2:
-            total_processing = history_df['processing_amount'].sum()
-            st.metric("Total Amount Processed", f"£{total_processing:,.2f}")
-        
-        with col3:
-            unique_businesses = history_df['business_name'].nunique()
-            st.metric("Businesses Tracked", unique_businesses)
-        
-        # Export history
-        csv_data = history_df.to_csv(index=False)
-        st.download_button(
-            label="Download History CSV",
-            data=csv_data,
-            file_name=f"processing_history_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv"
-        )
-    else:
-        st.info("No processing history found. Process some transactions first!")
+        if not history_df.empty:
+            # Format for display
+            display_df = history_df.copy()
+            display_df['income_amount'] = display_df['income_amount'].apply(lambda x: f"£{x:,.2f}")
+            display_df['processing_amount'] = display_df['processing_amount'].apply(lambda x: f"£{x:,.2f}")
+            display_df['processing_percentage'] = display_df['processing_percentage'].apply(lambda x: f"{x:.1f}%")
+
+            st.dataframe(
+                display_df[['date', 'business_name', 'income_amount', 'processing_amount', 'processing_percentage', 'period_start', 'period_end']],
+                column_config={
+                    'date': 'Processing Date',
+                    'business_name': 'Business',
+                    'income_amount': 'Income Amount',
+                    'processing_amount': 'Processing Amount',
+                    'processing_percentage': 'Processing %',
+                    'period_start': 'Period Start',
+                    'period_end': 'Period End'
+                },
+                use_container_width=True
+            )
+
+            # Summary statistics
+            st.subheader("History Summary")
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                total_income = history_df['income_amount'].sum()
+                st.metric("Total Income Processed", f"£{total_income:,.2f}")
+
+            with col2:
+                total_processing = history_df['processing_amount'].sum()
+                st.metric("Total Amount Processed", f"£{total_processing:,.2f}")
+
+            with col3:
+                unique_businesses = history_df['business_name'].nunique()
+                st.metric("Businesses Tracked", unique_businesses)
+
+            # Export history
+            csv_data = history_df.to_csv(index=False)
+            st.download_button(
+                label="Download History CSV",
+                data=csv_data,
+                file_name=f"processing_history_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv"
+            )
+        else:
+            st.info("No processing history found. Process some transactions first!")
 
 def main():
     """

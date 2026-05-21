@@ -253,6 +253,85 @@ class AppTests(unittest.TestCase):
         self.assertEqual(summary.loc['Alpha Ltd', 'Amount to Process'], 15.0)
         self.assertEqual(summary.loc['Beta Ltd', 'Amount to Process'], 40.0)
 
+    def test_create_advance_updates_split_and_balance(self):
+        business_id = app.add_or_update_business('Alpha Ltd', 10.0)
+
+        advance_id = app.create_advance(
+            business_id=business_id,
+            amount_loaned=1000.0,
+            factor_rate=1.25,
+            split_percentage=15.0,
+            funded_date='2026-05-21',
+        )
+
+        businesses = app.get_all_businesses()
+        self.assertEqual(businesses.iloc[0]['processing_percentage'], 15.0)
+
+        balances = app.get_advance_balances()
+        advance = balances[balances['id'] == advance_id].iloc[0]
+        self.assertEqual(advance['total_repayable'], 1250.0)
+        self.assertEqual(advance['balance_remaining'], 1250.0)
+        self.assertEqual(advance['status'], 'active')
+
+    def test_manual_payment_reduces_advance_balance(self):
+        business_id = app.add_or_update_business('Alpha Ltd', 10.0)
+        advance_id = app.create_advance(
+            business_id=business_id,
+            amount_loaned=1000.0,
+            factor_rate=1.20,
+            split_percentage=10.0,
+            funded_date='2026-05-21',
+        )
+
+        app.record_advance_payment(
+            advance_id=advance_id,
+            business_id=business_id,
+            payment_date='2026-05-21',
+            payment_amount=200.0,
+            source='manual',
+        )
+
+        balance = app.get_advance_balances().iloc[0]
+        self.assertEqual(balance['total_paid'], 200.0)
+        self.assertEqual(balance['balance_remaining'], 1000.0)
+        self.assertEqual(balance['status'], 'active')
+
+    def test_saved_processing_payment_applies_to_active_advance(self):
+        business_id = app.add_or_update_business('Alpha Ltd', 10.0)
+        app.create_advance(
+            business_id=business_id,
+            amount_loaned=500.0,
+            factor_rate=1.20,
+            split_percentage=10.0,
+            funded_date='2026-05-21',
+        )
+
+        history_id = app.save_processing_history(
+            business_id=business_id,
+            date='2026-05-21',
+            income_amount=1000.0,
+            processing_amount=100.0,
+            period_start='2026-05-01',
+            period_end='2026-05-21',
+        )
+        applied = app.apply_processing_payment_to_active_advance(
+            business_id=business_id,
+            processing_history_id=history_id,
+            payment_date='2026-05-21',
+            payment_amount=100.0,
+            period_start='2026-05-01',
+            period_end='2026-05-21',
+        )
+
+        self.assertTrue(applied)
+        balance = app.get_advance_balances().iloc[0]
+        self.assertEqual(balance['total_paid'], 100.0)
+        self.assertEqual(balance['balance_remaining'], 500.0)
+
+        ledger = app.get_payment_ledger()
+        self.assertEqual(len(ledger), 1)
+        self.assertEqual(ledger.iloc[0]['source'], 'processing_run')
+
 
 if __name__ == '__main__':
     unittest.main()
