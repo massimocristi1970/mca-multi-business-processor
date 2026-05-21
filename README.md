@@ -97,6 +97,23 @@ For local-only seeding, copy `businesses_seed.example.json` to `businesses_seed.
 - View past processing calculations
 - Export historical data for reporting
 
+## Render Deployment
+
+This repo includes a `render.yaml` blueprint for deploying the Streamlit app to Render as a free web service.
+
+Render settings:
+
+| Setting | Value |
+|---------|-------|
+| Service name | `mca-multi-business-processor` |
+| Runtime | Python |
+| Build command | `pip install -r requirements.txt` |
+| Start command | `streamlit run app.py --server.address=0.0.0.0 --server.port=$PORT --server.headless=true` |
+| Health check | `/_stcore/health` |
+| Region | Frankfurt |
+
+The free Render filesystem is ephemeral, so the default SQLite database can reset after restarts or redeploys. Use the app's backup/restore controls for free usage, or set `DATABASE_URL` to a hosted Postgres database for durable business settings and processing history.
+
 ## 📁 JSON File Format
 
 Your transaction JSON files should follow this structure:
