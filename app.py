@@ -89,6 +89,11 @@ def get_database_url():
     """Return a cloud database URL when configured, otherwise local SQLite."""
     database_url = get_secret_value("DATABASE_URL", "database_url") or os.environ.get("DATABASE_URL")
     if database_url:
+        database_url = str(database_url)
+        if database_url.startswith("postgres://"):
+            return database_url.replace("postgres://", "postgresql+psycopg2://", 1)
+        if database_url.startswith("postgresql://"):
+            return database_url.replace("postgresql://", "postgresql+psycopg2://", 1)
         return str(database_url)
     return f"sqlite:///{DATABASE_FILE}"
 
