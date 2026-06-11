@@ -12,6 +12,6 @@ if exist "venv\Scripts\activate.bat" (
 )
 
 REM Run the Streamlit app
-streamlit run app.py
+streamlit run app.py --server.port 8623 --server.address localhost
 
 pause
